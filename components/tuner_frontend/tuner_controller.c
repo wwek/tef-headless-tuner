@@ -73,6 +73,7 @@ static tuner_xdr_settings_t s_xdr_settings = {
     .audio_mode = TUNER_XDR_AUDIO_MODE_STEREO_AUTO,
     .ims_enabled = false,
     .eq_enabled = false,
+    .deemphasis_us = 50,
     .softmute_fm = false,
     .softmute_am = false,
     .fm_bandwidth_khz = 0,
@@ -87,30 +88,31 @@ static bool band_is_fm(tef_band_t band);
 static esp_err_t read_live_status(tef_status_t *status);
 static esp_err_t read_quality_for_band(tef_band_t band, tef_quality_t *quality);
 
-static bool squelch_enabled(void)
+static bool squelch_enabled_state(bool auto_squelch_enabled, int16_t manual_squelch_threshold_db)
 {
-    return s_auto_squelch_enabled || s_manual_squelch_threshold_db >= 0;
+    return auto_squelch_enabled || manual_squelch_threshold_db >= 0;
 }
 
-static int16_t squelch_close_threshold_for_band(tef_band_t band)
+static int16_t squelch_close_threshold_for_band_state(tef_band_t band, bool auto_squelch_enabled, int16_t manual_squelch_threshold_db)
 {
-    if (s_auto_squelch_enabled) {
+    if (auto_squelch_enabled) {
         return band_is_fm(band) ? 120 : 60;
     }
 
-    if (s_manual_squelch_threshold_db >= 0) {
-        return (int16_t)(s_manual_squelch_threshold_db * 10);
+    if (manual_squelch_threshold_db >= 0) {
+        return (int16_t)(manual_squelch_threshold_db * 10);
     }
 
     return 0;
 }
 
-static int16_t squelch_open_threshold_for_band(tef_band_t band)
+static int16_t squelch_open_threshold_for_band_state(tef_band_t band, bool auto_squelch_enabled, int16_t manual_squelch_threshold_db)
 {
-    return (int16_t)(squelch_close_threshold_for_band(band) + (band_is_fm(band) ? 30 : 20));
+    return (int16_t)(squelch_close_threshold_for_band_state(band, auto_squelch_enabled, manual_squelch_threshold_db)
+                     + (band_is_fm(band) ? 30 : 20));
 }
 
-static esp_err_t apply_effective_mute(void)
+static esp_err_t apply_effective_mute_locked(void)
 {
     const bool muted = s_user_muted || s_squelch_muted || s_scan_muted;
 
@@ -130,16 +132,27 @@ static esp_err_t apply_effective_mute(void)
 static void update_squelch_state(tef_band_t band, bool tuned, const tef_quality_t *quality)
 {
     bool squelched = false;
+    bool auto_squelch_enabled;
+    bool seeking;
+    bool currently_squelched;
+    int16_t manual_squelch_threshold_db;
 
-    if (s_seeking) {
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    auto_squelch_enabled = s_auto_squelch_enabled;
+    manual_squelch_threshold_db = s_manual_squelch_threshold_db;
+    seeking = s_seeking;
+    currently_squelched = s_squelch_muted;
+    bool enabled = squelch_enabled_state(auto_squelch_enabled, manual_squelch_threshold_db);
+
+    if (seeking) {
         squelched = true;
-    } else if (squelch_enabled() && quality != NULL) {
-        const int16_t close_threshold = squelch_close_threshold_for_band(band);
-        const int16_t open_threshold = squelch_open_threshold_for_band(band);
+    } else if (enabled && quality != NULL) {
+        const int16_t close_threshold = squelch_close_threshold_for_band_state(band, auto_squelch_enabled, manual_squelch_threshold_db);
+        const int16_t open_threshold = squelch_open_threshold_for_band_state(band, auto_squelch_enabled, manual_squelch_threshold_db);
 
         if (!tuned) {
             squelched = true;
-        } else if (s_squelch_muted) {
+        } else if (currently_squelched) {
             squelched = quality->level < open_threshold;
         } else {
             squelched = quality->level < close_threshold;
@@ -147,7 +160,8 @@ static void update_squelch_state(tef_band_t band, bool tuned, const tef_quality_
     }
 
     s_squelch_muted = squelched;
-    (void)apply_effective_mute();
+    (void)apply_effective_mute_locked();
+    xSemaphoreGive(s_state_mutex);
 }
 
 static esp_err_t refresh_squelch_state_now(void)
@@ -155,9 +169,16 @@ static esp_err_t refresh_squelch_state_now(void)
     tef_quality_t quality = {0};
     esp_err_t err;
 
-    if (!squelch_enabled()) {
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool enabled = squelch_enabled_state(s_auto_squelch_enabled, s_manual_squelch_threshold_db);
+    xSemaphoreGive(s_state_mutex);
+
+    if (!enabled) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
         s_squelch_muted = false;
-        return apply_effective_mute();
+        err = apply_effective_mute_locked();
+        xSemaphoreGive(s_state_mutex);
+        return err;
     }
 
     err = read_quality_for_band(s_active_band, &quality);
@@ -620,9 +641,10 @@ esp_err_t tuner_controller_start_seek(bool up, bool am_mode)
     s_seek_am_mode = am_mode;
     s_seek_abort = false;
     s_seeking = true;
-    // Fix #6: always mute during seek, not just when squelch is enabled
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_squelch_muted = true;
-    (void)apply_effective_mute();
+    (void)apply_effective_mute_locked();
+    xSemaphoreGive(s_state_mutex);
     xTaskNotifyGive(s_seek_task);
     return ESP_OK;
 }
@@ -686,11 +708,13 @@ esp_err_t tuner_controller_set_mute(bool mute)
 {
     const bool previous = s_user_muted;
 
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_user_muted = mute;
-    esp_err_t err = apply_effective_mute();
+    esp_err_t err = apply_effective_mute_locked();
     if (err != ESP_OK) {
         s_user_muted = previous;
     }
+    xSemaphoreGive(s_state_mutex);
     return err;
 }
 
@@ -717,7 +741,13 @@ esp_err_t tuner_controller_set_power(bool on)
 
 esp_err_t tuner_controller_set_deemphasis(uint16_t timeconstant)
 {
-    return tef6686_set_deemphasis(timeconstant);
+    esp_err_t err = tef6686_set_deemphasis(timeconstant);
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        s_xdr_settings.deemphasis_us = timeconstant;
+        xSemaphoreGive(s_state_mutex);
+    }
+    return err;
 }
 
 // Fix #2: s_xdr_settings writes under mutex
@@ -857,10 +887,14 @@ esp_err_t tuner_controller_set_auto_squelch(bool on)
 {
     const bool previous = s_auto_squelch_enabled;
 
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_auto_squelch_enabled = on;
+    xSemaphoreGive(s_state_mutex);
     esp_err_t err = refresh_squelch_state_now();
     if (err != ESP_OK) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
         s_auto_squelch_enabled = previous;
+        xSemaphoreGive(s_state_mutex);
         (void)refresh_squelch_state_now();
     }
     return err;
@@ -870,10 +904,14 @@ esp_err_t tuner_controller_set_squelch(int16_t threshold_db)
 {
     const int16_t previous = s_manual_squelch_threshold_db;
 
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_manual_squelch_threshold_db = threshold_db;
+    xSemaphoreGive(s_state_mutex);
     esp_err_t err = refresh_squelch_state_now();
     if (err != ESP_OK) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
         s_manual_squelch_threshold_db = previous;
+        xSemaphoreGive(s_state_mutex);
         (void)refresh_squelch_state_now();
     }
     return err;
@@ -883,11 +921,13 @@ esp_err_t tuner_controller_set_scan_mute(bool mute)
 {
     const bool previous = s_scan_muted;
 
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_scan_muted = mute;
-    esp_err_t err = apply_effective_mute();
+    esp_err_t err = apply_effective_mute_locked();
     if (err != ESP_OK) {
         s_scan_muted = previous;
     }
+    xSemaphoreGive(s_state_mutex);
     return err;
 }
 

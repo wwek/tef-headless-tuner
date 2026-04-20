@@ -25,6 +25,7 @@ typedef struct {
     tuner_xdr_audio_mode_t audio_mode;
     bool ims_enabled;
     bool eq_enabled;
+    uint16_t deemphasis_us;
     bool softmute_fm;
     bool softmute_am;
     uint16_t fm_bandwidth_khz;

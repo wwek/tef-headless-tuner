@@ -19,12 +19,14 @@
 #define XDR_PORT          7373
 #define MAX_XDR_CLIENTS   4
 #define RX_BUF_SIZE       256
+#define TX_BUF_SIZE       4096
 #define STATUS_INTERVAL_MS 67
 #define AUTH_SALT_LEN     16
 #define SHA1_HEX_LEN      40
 #define XDR_TASK_STACK    6144
 #define XDR_TASK_PRIO     4
 #define XDR_SCAN_SETTLE_MS 20
+#define CLIENT_SEND_TIMEOUT_MS 1000
 
 static const char *TAG = "xdr";
 
@@ -33,6 +35,10 @@ typedef struct {
     bool authenticated;
     bool active;
     uint32_t session_id;
+    size_t rx_len;
+    char rx_buf[RX_BUF_SIZE];
+    size_t tx_len;
+    char tx_buf[TX_BUF_SIZE];
     uint16_t last_pi;
     uint16_t last_rds_b;
     uint16_t last_rds_c;
@@ -134,6 +140,9 @@ static void close_client(xdr_client_t *c)
     }
     c->active = false;
     c->authenticated = false;
+    c->session_id = 0;
+    c->rx_len = 0;
+    c->tx_len = 0;
     c->last_pi = 0;
     c->last_rds_b = 0;
     c->last_rds_c = 0;
@@ -161,22 +170,50 @@ static int wait_socket_writable(int sock, int timeout_ms)
     return FD_ISSET(sock, &write_fds) ? 0 : -1;
 }
 
-static int send_all_nonblocking(int sock, const char *buf, size_t len)
+static int recv_line_blocking(int sock, char *buf, size_t size, int timeout_ms)
 {
-    while (len > 0) {
-        int n = send(sock, buf, len, 0);
+    struct timeval tv = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    size_t len = 0;
+
+    if (size < 2) {
+        return -1;
+    }
+
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    while (len + 1 < size) {
+        int n = recv(sock, buf + len, size - len - 1, 0);
         if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+            if (errno == EINTR) {
+                continue;
+            }
             return -1;
         }
         if (n == 0) {
             return -1;
         }
-        buf += n;
-        len -= n;
+
+        len += (size_t)n;
+        buf[len] = '\0';
+
+        char *nl = strchr(buf, '\n');
+        if (nl != NULL) {
+            *nl = '\0';
+            if (nl > buf && *(nl - 1) == '\r') {
+                *(nl - 1) = '\0';
+            }
+            return (int)strlen(buf);
+        }
+
+        if (len == SHA1_HEX_LEN) {
+            return (int)len;
+        }
     }
-    return 0;
+
+    return -1;
 }
 
 static int send_all_retry(int sock, const char *buf, size_t len, int timeout_ms)
@@ -201,14 +238,171 @@ static int send_all_retry(int sock, const char *buf, size_t len, int timeout_ms)
     return 0;
 }
 
-static int send_str_nonblocking(int sock, const char *str)
-{
-    return send_all_nonblocking(sock, str, strlen(str));
-}
-
 static int send_str_retry(int sock, const char *str, int timeout_ms)
 {
     return send_all_retry(sock, str, strlen(str), timeout_ms);
+}
+
+static int flush_client_tx_wait(xdr_client_t *c, int timeout_ms)
+{
+    int waited_ms = 0;
+
+    while (s_running && waited_ms <= timeout_ms) {
+        int sock;
+        size_t tx_len;
+        ssize_t sent;
+
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (!c->active || c->sock < 0) {
+            xSemaphoreGive(s_state_mutex);
+            return -1;
+        }
+        if (c->tx_len == 0) {
+            xSemaphoreGive(s_state_mutex);
+            return 0;
+        }
+        sock = c->sock;
+        tx_len = c->tx_len;
+        xSemaphoreGive(s_state_mutex);
+
+        sent = send(sock, c->tx_buf, tx_len, 0);
+        if (sent > 0) {
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            if ((size_t)sent < c->tx_len) {
+                memmove(c->tx_buf, c->tx_buf + sent, c->tx_len - (size_t)sent);
+            }
+            c->tx_len -= (size_t)sent;
+            xSemaphoreGive(s_state_mutex);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int slice_ms = (timeout_ms - waited_ms) > 10 ? 10 : (timeout_ms - waited_ms);
+            if (slice_ms <= 0) {
+                return 0;
+            }
+            (void)wait_socket_writable(sock, slice_ms);
+            waited_ms += slice_ms;
+            continue;
+        }
+
+        close_client(c);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int queue_client_data(xdr_client_t *c, uint32_t session_id, const char *buf, size_t len, int timeout_ms)
+{
+    int waited_ms = 0;
+
+    if (len > TX_BUF_SIZE) {
+        return -1;
+    }
+
+    while (s_running) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (!c->active || c->sock < 0 || c->session_id != session_id) {
+            xSemaphoreGive(s_state_mutex);
+            return -1;
+        }
+        if ((TX_BUF_SIZE - c->tx_len) >= len) {
+            memcpy(c->tx_buf + c->tx_len, buf, len);
+            c->tx_len += len;
+            xSemaphoreGive(s_state_mutex);
+            return 0;
+        }
+        xSemaphoreGive(s_state_mutex);
+
+        if (timeout_ms <= 0 || waited_ms >= timeout_ms) {
+            return -1;
+        }
+
+        int remaining_ms = timeout_ms - waited_ms;
+        int slice_ms = remaining_ms > 50 ? 50 : remaining_ms;
+        if (flush_client_tx_wait(c, slice_ms) < 0) {
+            return -1;
+        }
+        waited_ms += slice_ms;
+    }
+
+    return -1;
+}
+
+static int queue_client_str_drop(xdr_client_t *c, const char *str)
+{
+    return queue_client_data(c, c->session_id, str, strlen(str), 0);
+}
+
+static int queue_client_str(xdr_client_t *c, const char *str)
+{
+    if (queue_client_data(c, c->session_id, str, strlen(str), CLIENT_SEND_TIMEOUT_MS) != 0) {
+        close_client(c);
+        return -1;
+    }
+    return 0;
+}
+
+static int queue_client_str_wait(xdr_client_t *c, uint32_t session_id, const char *str, int timeout_ms)
+{
+    return queue_client_data(c, session_id, str, strlen(str), timeout_ms);
+}
+
+static int queue_client_frame_drop(xdr_client_t *c, const char *buf, size_t len)
+{
+    return queue_client_data(c, c->session_id, buf, len, 0);
+}
+
+static int queue_client_frame(xdr_client_t *c, const char *buf, size_t len)
+{
+    if (queue_client_data(c, c->session_id, buf, len, CLIENT_SEND_TIMEOUT_MS) != 0) {
+        close_client(c);
+        return -1;
+    }
+    return 0;
+}
+
+static int queue_client_frame_wait(xdr_client_t *c, uint32_t session_id, const char *buf, size_t len, int timeout_ms)
+{
+    return queue_client_data(c, session_id, buf, len, timeout_ms);
+}
+
+static void flush_client_tx(xdr_client_t *c)
+{
+    while (true) {
+        int sock;
+        size_t tx_len;
+        ssize_t sent;
+
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (!c->active || c->sock < 0 || c->tx_len == 0) {
+            xSemaphoreGive(s_state_mutex);
+            return;
+        }
+        sock = c->sock;
+        tx_len = c->tx_len;
+        sent = send(sock, c->tx_buf, tx_len, 0);
+        if (sent > 0) {
+            if ((size_t)sent < c->tx_len) {
+                memmove(c->tx_buf, c->tx_buf + sent, c->tx_len - (size_t)sent);
+            }
+            c->tx_len -= (size_t)sent;
+            xSemaphoreGive(s_state_mutex);
+            continue;
+        }
+
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            xSemaphoreGive(s_state_mutex);
+            return;
+        }
+
+        xSemaphoreGive(s_state_mutex);
+        close_client(c);
+        return;
+    }
 }
 
 static int scan_owner_sock(void)
@@ -269,12 +463,16 @@ static uint8_t pack_rds_error_bits(uint16_t dec_error)
 
 static void format_signal_level(char *buf, size_t size, int16_t level_tenth_db)
 {
-    int16_t abs_level = level_tenth_db < 0 ? (int16_t)-level_tenth_db : level_tenth_db;
+    int32_t abs_level = level_tenth_db;
+
+    if (abs_level < 0) {
+        abs_level = -abs_level;
+    }
 
     snprintf(buf, size, "%s%d.%d",
              level_tenth_db < 0 ? "-" : "",
-             abs_level / 10,
-             abs_level % 10);
+             (int)(abs_level / 10),
+             (int)(abs_level % 10));
 }
 
 static uint16_t bandwidth_from_index(int index)
@@ -300,10 +498,12 @@ static uint16_t bandwidth_from_filter_code(int filter_code)
     case 0: return 56;
     case 26: return 64;
     case 1: return 72;
+    case 2: return 77;
     case 28: return 84;
     case 29: return 97;
     case 3: return 114;
     case 4: return 133;
+    case 6: return 142;
     case 5: return 151;
     case 7: return 168;
     case 8: return 184;
@@ -312,8 +512,36 @@ static uint16_t bandwidth_from_filter_code(int filter_code)
     case 11: return 236;
     case 12: return 254;
     case 13: return 287;
+    case 14: return 269;
     case 15: return 311;
     default: return UINT16_MAX;
+    }
+}
+
+static int filter_code_from_bandwidth(uint16_t bandwidth_khz)
+{
+    switch (bandwidth_khz) {
+    case 0: return -1;
+    case 56: return 0;
+    case 64: return 26;
+    case 72: return 1;
+    case 77: return 2;
+    case 84: return 28;
+    case 97: return 29;
+    case 114: return 3;
+    case 133: return 4;
+    case 142: return 6;
+    case 151: return 5;
+    case 168: return 7;
+    case 184: return 8;
+    case 200: return 9;
+    case 217: return 10;
+    case 236: return 11;
+    case 254: return 12;
+    case 269: return 14;
+    case 287: return 13;
+    case 311: return 15;
+    default: return -2;
     }
 }
 
@@ -337,9 +565,16 @@ static void xdr_scan_task(void *arg)
 
     tuner_state_t saved_state = tuner_controller_get_state();
     tuner_xdr_settings_t saved_settings = {0};
+    xdr_client_t *owner = NULL;
+    uint32_t owner_session_id = 0;
     const bool scan_is_fm = scan_uses_fm(s_scan_state.start_khz, s_scan_state.end_khz, saved_state.active_band);
     const uint32_t step_khz = s_scan_state.step_khz == 0 ? (scan_is_fm ? 100U : 9U) : s_scan_state.step_khz;
     esp_err_t err = tuner_controller_set_scan_mute(true);
+
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    owner = s_scan_state.owner;
+    owner_session_id = s_scan_state.owner_session_id;
+    xSemaphoreGive(s_state_mutex);
 
     tuner_controller_get_xdr_settings(&saved_settings);
 
@@ -347,21 +582,15 @@ static void xdr_scan_task(void *arg)
         (void)tuner_controller_set_bandwidth_fm(s_scan_state.bandwidth_khz);
     }
 
-    {
-        int sock = scan_owner_sock();
-        if (err != ESP_OK || sock < 0) {
-            err = err == ESP_OK ? ESP_FAIL : err;
-        } else if (send_str_retry(sock, "U", 1000) != 0) {
-            err = ESP_FAIL;
-        }
+    if (err != ESP_OK || owner == NULL || queue_client_str_wait(owner, owner_session_id, "U", 1000) != 0) {
+        err = err == ESP_OK ? ESP_FAIL : err;
     }
 
     if (err == ESP_OK) {
         for (uint32_t freq_khz = s_scan_state.start_khz;
              freq_khz <= s_scan_state.end_khz && s_running;
              freq_khz += step_khz) {
-            int sock = scan_owner_sock();
-            if (sock < 0) {
+            if (scan_owner_sock() < 0) {
                 break;
             }
 
@@ -379,7 +608,7 @@ static void xdr_scan_task(void *arg)
             int len = snprintf(chunk, sizeof(chunk), "%" PRIu32 " = %d, ",
                                freq_khz,
                                xdr_scan_level_from_state(&state));
-            if (send_all_retry(sock, chunk, (size_t)len, 1000) < 0) {
+            if (queue_client_frame_wait(owner, owner_session_id, chunk, (size_t)len, 1000) != 0) {
                 break;
             }
 
@@ -388,16 +617,10 @@ static void xdr_scan_task(void *arg)
             }
         }
 
-        {
-            int sock = scan_owner_sock();
-            if (sock >= 0) {
-                send_str_retry(sock, "\n", 1000);
-            }
-        }
+        (void)queue_client_str_wait(owner, owner_session_id, "\n", 1000);
     } else {
-        int sock = scan_owner_sock();
-        if (sock >= 0) {
-            send_str_retry(sock, "E_SCAN\n", 1000);
+        if (owner != NULL) {
+            (void)queue_client_str_wait(owner, owner_session_id, "E_SCAN\n", 1000);
         }
     }
 
@@ -416,7 +639,7 @@ static void xdr_scan_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static int send_xdr_g_state(int sock)
+static int send_xdr_g_state_client(xdr_client_t *c)
 {
     tuner_xdr_settings_t settings = {0};
     char buf[8];
@@ -426,18 +649,18 @@ static int send_xdr_g_state(int sock)
     len = snprintf(buf, sizeof(buf), "G%d%d\n",
                    settings.eq_enabled ? 0 : 1,
                    settings.ims_enabled ? 0 : 1);
-    return send_all_nonblocking(sock, buf, (size_t)len);
+    return queue_client_frame(c, buf, (size_t)len);
 }
 
-static int send_xdr_tune_state(int sock)
+static int send_xdr_tune_state_client(xdr_client_t *c)
 {
     tuner_state_t state = tuner_controller_get_state();
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "T%" PRIu32 "\n", state.status.frequency);
-    return send_all_nonblocking(sock, buf, (size_t)len);
+    return queue_client_frame(c, buf, (size_t)len);
 }
 
-static int send_xdr_b_state(int sock)
+static int send_xdr_b_state_client(xdr_client_t *c)
 {
     tuner_xdr_settings_t settings = {0};
     char buf[8];
@@ -447,7 +670,80 @@ static int send_xdr_b_state(int sock)
     tuner_controller_get_xdr_settings(&settings);
     value = settings.audio_mode == TUNER_XDR_AUDIO_MODE_STEREO_AUTO ? 0 : 1;
     len = snprintf(buf, sizeof(buf), "B%d\n", value);
-    return send_all_nonblocking(sock, buf, (size_t)len);
+    return queue_client_frame(c, buf, (size_t)len);
+}
+
+static int send_xdr_a_state_client(xdr_client_t *c)
+{
+    tuner_xdr_settings_t settings = {0};
+    char buf[8];
+    int len;
+
+    tuner_controller_get_xdr_settings(&settings);
+    len = snprintf(buf, sizeof(buf), "A%u\n", (unsigned)settings.agc_index);
+    return queue_client_frame(c, buf, (size_t)len);
+}
+
+static int send_xdr_d_state_client(xdr_client_t *c)
+{
+    tuner_xdr_settings_t settings = {0};
+    char buf[8];
+    int value = 2;
+    int len;
+
+    tuner_controller_get_xdr_settings(&settings);
+    if (settings.deemphasis_us == 50) {
+        value = 0;
+    } else if (settings.deemphasis_us == 75) {
+        value = 1;
+    }
+
+    len = snprintf(buf, sizeof(buf), "D%d\n", value);
+    return queue_client_frame(c, buf, (size_t)len);
+}
+
+static int send_xdr_w_state_client(xdr_client_t *c)
+{
+    tuner_xdr_settings_t settings = {0};
+    char buf[16];
+    unsigned bandwidth_hz = 0;
+    int len;
+
+    tuner_controller_get_xdr_settings(&settings);
+    if (settings.fm_bandwidth_khz > 0) {
+        bandwidth_hz = (unsigned)settings.fm_bandwidth_khz * 1000U;
+    }
+
+    len = snprintf(buf, sizeof(buf), "W%u\n", bandwidth_hz);
+    return queue_client_frame(c, buf, (size_t)len);
+}
+
+static int send_xdr_f_state_client(xdr_client_t *c)
+{
+    tuner_xdr_settings_t settings = {0};
+    char buf[16];
+    int filter_code;
+    int len;
+
+    tuner_controller_get_xdr_settings(&settings);
+    filter_code = filter_code_from_bandwidth(settings.fm_bandwidth_khz);
+    if (filter_code < -1) {
+        return 0;
+    }
+
+    len = snprintf(buf, sizeof(buf), "F%d\n", filter_code);
+    return queue_client_frame(c, buf, (size_t)len);
+}
+
+static int send_xdr_z_state_client(xdr_client_t *c)
+{
+    tuner_xdr_settings_t settings = {0};
+    char buf[8];
+    int len;
+
+    tuner_controller_get_xdr_settings(&settings);
+    len = snprintf(buf, sizeof(buf), "Z%u\n", (unsigned)settings.antenna_index);
+    return queue_client_frame(c, buf, (size_t)len);
 }
 
 // Generate random hex salt of AUTH_SALT_LEN chars
@@ -526,7 +822,13 @@ static void handle_new_connection(void)
 
     memset(c, 0, sizeof(*c));
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_next_session_id == 0) {
+        s_next_session_id = 1;
+    }
     c->session_id = s_next_session_id++;
+    if (s_next_session_id == 0) {
+        s_next_session_id = 1;
+    }
     xSemaphoreGive(s_state_mutex);
     c->sock = sock;
     c->active = true;
@@ -545,8 +847,8 @@ static void handle_new_connection(void)
             ESP_LOGE(TAG, "failed to set nonblocking on new client");
             return;
         }
-        send_str_nonblocking(sock, "o1,0\n");
-        send_xdr_g_state(sock);
+        (void)queue_client_str(c, "o1,0\n");
+        (void)send_xdr_g_state_client(c);
         free(stored_key);
         ESP_LOGI(TAG, "client connected (no auth)");
         return;
@@ -570,17 +872,13 @@ static void handle_new_connection(void)
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     char resp[SHA1_HEX_LEN + 2] = {0};
-    int n = recv(sock, resp, sizeof(resp) - 1, 0);
+    int n = recv_line_blocking(sock, resp, sizeof(resp), 5000);
 
     if (n <= 0) {
         ESP_LOGW(TAG, "auth: no response from client");
         close_client(c);
         return;
     }
-
-    // Strip trailing newline
-    if (n > 0 && resp[n - 1] == '\n') resp[n - 1] = '\0';
-    if (n > 1 && resp[n - 2] == '\r') resp[n - 2] = '\0';
 
     if (strlen(resp) == SHA1_HEX_LEN && memcmp(resp, expected, SHA1_HEX_LEN) == 0) {
         c->authenticated = true;
@@ -589,8 +887,8 @@ static void handle_new_connection(void)
             ESP_LOGE(TAG, "failed to set nonblocking on authenticated client");
             return;
         }
-        send_str_nonblocking(sock, "o1,0\n");
-        send_xdr_g_state(sock);
+        (void)queue_client_str(c, "o1,0\n");
+        (void)send_xdr_g_state_client(c);
         ESP_LOGI(TAG, "client authenticated");
     } else {
         send_str_retry(sock, "a0\n", 1000);
@@ -615,7 +913,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_agc_index((uint8_t)agc) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "A%d\n", agc);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -635,7 +933,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             char resp[8];
             int value = mode > 1 ? 2 : mode;
             int len = snprintf(resp, sizeof(resp), "B%d\n", value);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -670,11 +968,11 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
 
         if (band_mode_is_am(before.active_band) != band_mode_is_am(after.active_band)) {
             len = snprintf(resp, sizeof(resp), "M%d\n", band_mode_is_am(after.active_band) ? 1 : 0);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
 
         len = snprintf(resp, sizeof(resp), "T%" PRIu32 "\n", after.status.frequency);
-        send_all_nonblocking(c->sock, resp, (size_t)len);
+        (void)queue_client_frame(c, resp, (size_t)len);
         break;
     }
     case 'M': {
@@ -693,7 +991,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (err == ESP_OK) {
             char resp[32];
             int len = snprintf(resp, sizeof(resp), "M%d\nT%" PRIu32 "\n", mode, applied_freq);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -703,7 +1001,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
 
         if (volume == 0) {
             if (tuner_controller_set_mute(true) == ESP_OK) {
-                send_str_nonblocking(c->sock, "Y0\n");
+                (void)queue_client_str(c, "Y0\n");
             }
             break;
         }
@@ -711,7 +1009,13 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             break;
         }
 
-        scaled = (uint8_t)(volume >= 10 ? volume / 10 : volume);
+        if (volume > 255) {
+            volume = 255;
+        }
+        scaled = (uint8_t)(((unsigned)volume * 30U + 127U) / 255U);
+        if (scaled == 0) {
+            scaled = 1;
+        }
         if (scaled > 30) {
             scaled = 30;
         }
@@ -720,7 +1024,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             && tuner_controller_set_volume(scaled) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "Y%d\n", volume);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -733,7 +1037,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_deemphasis(deemp) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "D%d\n", val);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -748,7 +1052,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "F%d\n", index);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -776,7 +1080,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_xdr_eq(ims_enabled, eq_enabled) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "G%02d\n", value);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -802,7 +1106,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             xSemaphoreGive(s_state_mutex);
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "H%d\n", enabled ? 1 : 0);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -822,7 +1126,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             current = (unsigned)s_xdr_runtime.fm_scan_sensitivity;
             xSemaphoreGive(s_state_mutex);
             int len = snprintf(resp, sizeof(resp), "I%u\n", current);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -841,7 +1145,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "J%d\n", enabled ? 1 : 0);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -861,7 +1165,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             current = (unsigned)s_xdr_runtime.scan_hold;
             xSemaphoreGive(s_state_mutex);
             int len = snprintf(resp, sizeof(resp), "K%u\n", current);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -884,7 +1188,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "W%d\n", bandwidth);
-            send_all(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -899,11 +1203,11 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             s_xdr_runtime.squelch = squelch;
             xSemaphoreGive(s_state_mutex);
             if (squelch == -1) {
-                send_str_nonblocking(c->sock, "Q-1\n");
+                (void)queue_client_str(c, "Q-1\n");
             } else {
                 char resp[16];
                 int len = snprintf(resp, sizeof(resp), "Q%d\n", value);
-                send_all_nonblocking(c->sock, resp, (size_t)len);
+                (void)queue_client_frame(c, resp, (size_t)len);
             }
         }
         break;
@@ -961,11 +1265,11 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
                 xSemaphoreGive(s_state_mutex);
                 if (xTaskCreate(xdr_scan_task, "xdr_scan", 4096, NULL, XDR_TASK_PRIO, &s_scan_state.task) != pdPASS) {
                     scan_finish();
-                    send_str_nonblocking(c->sock, "E_SCAN\n");
+                    (void)queue_client_str(c, "E_SCAN\n");
                 }
             } else {
                 xSemaphoreGive(s_state_mutex);
-                send_str_nonblocking(c->sock, "E_BUSY\n");
+                (void)queue_client_str(c, "E_BUSY\n");
             }
             break;
         default:
@@ -983,7 +1287,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (tuner_controller_set_antenna((uint8_t)antenna) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "Z%d\n", antenna);
-            send_all_nonblocking(c->sock, resp, (size_t)len);
+            (void)queue_client_frame(c, resp, (size_t)len);
         }
         break;
     }
@@ -994,20 +1298,26 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (dir == 1) {
             if (tuner_controller_start_seek(false, am_mode) == ESP_OK) {
                 c->last_seeking = true;
-                send_str_nonblocking(c->sock, "C1\n");
+                (void)queue_client_str(c, "C1\n");
             }
         } else if (dir == 2) {
             if (tuner_controller_start_seek(true, am_mode) == ESP_OK) {
                 c->last_seeking = true;
-                send_str_nonblocking(c->sock, "C2\n");
+                (void)queue_client_str(c, "C2\n");
             }
         }
         break;
     }
     case 'x': {
-        send_str_nonblocking(c->sock, "OK\n");
-        send_xdr_tune_state(c->sock);
-        send_xdr_b_state(c->sock);
+        (void)queue_client_str(c, "OK\n");
+        (void)send_xdr_tune_state_client(c);
+        (void)send_xdr_b_state_client(c);
+        (void)send_xdr_g_state_client(c);
+        (void)send_xdr_a_state_client(c);
+        (void)send_xdr_f_state_client(c);
+        (void)send_xdr_w_state_client(c);
+        (void)send_xdr_d_state_client(c);
+        (void)send_xdr_z_state_client(c);
         break;
     }
     case 'X': {
@@ -1051,15 +1361,15 @@ static void push_status(xdr_client_t *c)
                        (unsigned)(state.quality.usn / 10U),
                        (unsigned)state.quality.bandwidth);
     if (len > 0) {
-        send_all_nonblocking(c->sock, buf, (size_t)len);
+        (void)queue_client_frame_drop(c, buf, (size_t)len);
     }
 
     if (c->last_seeking && !state.seeking) {
-        send_str_nonblocking(c->sock, "C0\n");
+        (void)queue_client_str_drop(c, "C0\n");
         c->last_seeking = false;
     }
 
-    if (state.status.band == TEF_BAND_FM
+    if (state.active_band == TEF_BAND_FM
         && tuner_controller_get_rds_data(&raw) == ESP_OK
         && (raw.status & (1U << 9)) != 0) {
         uint8_t packed_error = pack_rds_error_bits(raw.dec_error);
@@ -1067,7 +1377,7 @@ static void push_status(xdr_client_t *c)
         if (((raw.dec_error >> 14) & 0x03U) < 3U && raw.block_a != c->last_pi) {
             c->last_pi = raw.block_a;
             len = snprintf(buf, sizeof(buf), "P%04X\n", raw.block_a);
-            send_all_nonblocking(c->sock, buf, (size_t)len);
+            (void)queue_client_frame_drop(c, buf, (size_t)len);
         }
 
         if (raw.block_b != c->last_rds_b
@@ -1083,7 +1393,7 @@ static void push_status(xdr_client_t *c)
                            raw.block_c,
                            raw.block_d,
                            packed_error);
-            send_all_nonblocking(c->sock, buf, (size_t)len);
+            (void)queue_client_frame_drop(c, buf, (size_t)len);
         }
     }
 }
@@ -1130,7 +1440,8 @@ static void xdr_tcp_task(void *arg)
     set_nonblocking(s_listen_sock);
     ESP_LOGI(TAG, "listening on port %d", XDR_PORT);
 
-    char rx_buf[RX_BUF_SIZE];
+    char rx_chunk[RX_BUF_SIZE];
+    TickType_t last_status_push_tick = xTaskGetTickCount();
 
     while (s_running) {
         fd_set read_fds;
@@ -1171,30 +1482,53 @@ static void xdr_tcp_task(void *arg)
             if (!FD_ISSET(c->sock, &read_fds)) continue;
             n--;
 
-            int r = recv(c->sock, rx_buf, sizeof(rx_buf) - 1, 0);
+            int r = recv(c->sock, rx_chunk, sizeof(rx_chunk), 0);
             if (r <= 0) {
                 ESP_LOGI(TAG, "client disconnected (recv=%d)", r);
                 close_client(c);
                 continue;
             }
-            rx_buf[r] = '\0';
 
-            // Process line by line
-            char *line = rx_buf;
+            if (c->rx_len + (size_t)r >= sizeof(c->rx_buf)) {
+                ESP_LOGW(TAG, "client rx overflow");
+                close_client(c);
+                continue;
+            }
+
+            memcpy(c->rx_buf + c->rx_len, rx_chunk, (size_t)r);
+            c->rx_len += (size_t)r;
+            c->rx_buf[c->rx_len] = '\0';
+
+            char *line = c->rx_buf;
             char *nl;
-            while ((nl = strchr(line, '\n')) != NULL) {
+            while ((nl = memchr(line, '\n', c->rx_buf + c->rx_len - line)) != NULL) {
                 *nl = '\0';
-                // Strip trailing CR
-                if (nl > line && *(nl - 1) == '\r') *(nl - 1) = '\0';
+                if (nl > line && *(nl - 1) == '\r') {
+                    *(nl - 1) = '\0';
+                }
                 if (*line) {
                     handle_xdr_command(c, line);
                 }
                 line = nl + 1;
             }
+
+            size_t remaining = (size_t)(c->rx_buf + c->rx_len - line);
+            if (remaining > 0 && line != c->rx_buf) {
+                memmove(c->rx_buf, line, remaining);
+            }
+            c->rx_len = remaining;
+            c->rx_buf[c->rx_len] = '\0';
         }
 
-        // Periodic status push on timeout (n == 0 means select timed out)
-        if (n == 0) {
+        for (int i = 0; i < MAX_XDR_CLIENTS; i++) {
+            if (s_clients[i].active) {
+                flush_client_tx(&s_clients[i]);
+            }
+        }
+
+        TickType_t now = xTaskGetTickCount();
+        if ((now - last_status_push_tick) >= pdMS_TO_TICKS(STATUS_INTERVAL_MS)) {
+            last_status_push_tick = now;
             for (int i = 0; i < MAX_XDR_CLIENTS; i++) {
                 if (s_clients[i].active && s_clients[i].authenticated) {
                     push_status(&s_clients[i]);
@@ -1212,6 +1546,7 @@ static void xdr_tcp_task(void *arg)
         s_listen_sock = -1;
     }
     s_running = false;
+    s_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -1246,6 +1581,17 @@ esp_err_t xdr_server_start(void)
 
 void xdr_server_stop(void)
 {
+    TaskHandle_t task = s_task;
+    if (task == NULL) {
+        s_running = false;
+        return;
+    }
+
     s_running = false;
-    // Task will clean up and delete itself
+    if (s_listen_sock >= 0) {
+        shutdown(s_listen_sock, SHUT_RDWR);
+    }
+    while (s_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
