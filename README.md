@@ -131,9 +131,11 @@ Default GPIO assignments (configurable via `menuconfig`):
 
 ### External Components
 
-- **I2C pull-up resistors**: 4.7kΩ on both SDA and SCL to 3V3
+- **I2C pull-up resistors**: 4.7kΩ on both SDA and SCL to 3V3 (only if not already present)
 
-No LDO needed — the ESP32-S3 DevKit onboard 3V3 output powers the TEF6686 module directly. If using a pre-built TEF6686 module (e.g., PE5PVB board), the crystal and surrounding passives are already onboard.
+I2C bus needs pull-up resistors, but only one set total — not one per device. Most TEF6686 modules and ESP32-S3 DevKits may or may not have them onboard. Check with a multimeter in resistance mode: measure between SDA/SCL and VCC on each module. If either side reads ~4.7kΩ, the pull-ups are already present and no external resistors are needed.
+
+No LDO needed — the ESP32-S3 DevKit onboard 3V3 output powers the TEF6686 module directly. TEF6686 metal-shielded modules include the crystal and surrounding passives onboard.
 
 ## Build
 
@@ -241,7 +243,7 @@ Connect to `/api/events` for real-time updates:
 
 ## XDR-GTK Server
 
-TCP server on port 7373 compatible with XDR-GTK desktop software. Supports SHA1 challenge authentication and the standard XDR protocol commands (T, M, Y, D, A, W, C, x). Status is pushed at ~15 Hz.
+TCP server on port 7373 with core XDR-GTK protocol compatibility. Supports SHA1 challenge authentication plus the main control commands `A`, `B`, `C`, `D`, `F`, `G`, `M`, `T`, `W`, `X`, `Y`, `Z`, and `x`. Status is pushed at ~15 Hz, including raw RDS frames and seek completion feedback.
 
 ## Host CLI
 
