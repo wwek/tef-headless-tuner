@@ -556,6 +556,13 @@ esp_err_t web_server_start(void)
     config.max_resp_headers  = 8;
     config.uri_match_fn      = httpd_uri_match_wildcard;
 
+    ESP_LOGI(TAG,
+             "http server config: req_hdr_max=%d, uri_max=%d, handlers=%u, stack=%u",
+             HTTPD_MAX_REQ_HDR_LEN,
+             HTTPD_MAX_URI_LEN,
+             (unsigned)config.max_uri_handlers,
+             (unsigned)config.stack_size);
+
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
