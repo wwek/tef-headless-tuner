@@ -23,6 +23,43 @@ idf_component_register(
     EMBED_TXTFILES html/index.html html/wifi.html
 )
 
+# --- Build version from git ---
+set(FIRMWARE_VERSION "0.1.0")
+
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${PROJECT_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_SHORT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE git_ok
+)
+if(NOT git_ok EQUAL 0)
+    set(GIT_COMMIT_SHORT "unknown")
+endif()
+
+execute_process(
+    COMMAND git rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${PROJECT_DIR}
+    OUTPUT_VARIABLE GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE git_ok
+)
+if(NOT git_ok EQUAL 0)
+    set(GIT_BRANCH "unknown")
+endif()
+
+string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/version.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/version.h
+    @ONLY
+)
+
+target_include_directories(${COMPONENT_LIB} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
 idf_build_get_property(build_components BUILD_COMPONENTS)
 if(tinyusb IN_LIST build_components)
     set(tinyusb_name tinyusb)

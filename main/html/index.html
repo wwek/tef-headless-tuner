@@ -47,6 +47,7 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 .lang-btn{background:none;border:1px solid #444;color:#aaa;border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer}
 .lang-btn:hover{border-color:#888;color:#eee}
 .wifi-link{font-size:.85em}
+.footer{text-align:center;font-size:.7em;color:#555;margin-top:12px;padding:8px 0}
 </style>
 </head>
 <body>
@@ -114,6 +115,7 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 </div>
 
 <a class="wifi-link" href="/wifi" data-i18n="wifi_settings">Wi-Fi Settings</a>
+<div class="footer" id="footer"></div>
 
 <script>
 let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false;
@@ -258,6 +260,9 @@ const auto=navigator.language.startsWith('zh')?'zh':'en';
 applyLang(saved||auto);
 fetch('/api/status').then(r=>r.json()).then(d=>updateStatus(d)).catch(()=>{});
 connectSSE();
+fetch('/api/version').then(r=>r.json()).then(d=>{
+document.getElementById('footer').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
+}).catch(()=>{});
 </script>
 </body>
 </html>

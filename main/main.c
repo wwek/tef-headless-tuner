@@ -7,6 +7,7 @@
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "xdr_server.h"
+#include "version.h"
 #include "tinyusb.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -56,7 +57,7 @@ static char const *s_string_desc[] = {
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "TEF6686 Headless Tuner starting...");
+    ESP_LOGI(TAG, "TEF6686 Headless Tuner v" FIRMWARE_VERSION " (" FIRMWARE_COMMIT "@" FIRMWARE_BRANCH " " FIRMWARE_BUILD_DATE ")");
 
     // Initialize TEF6686 via I2C
     esp_err_t err;

@@ -1,6 +1,7 @@
 #include "web_server.h"
 #include "tuner_controller.h"
 #include "wifi_manager.h"
+#include "version.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -198,6 +199,20 @@ static esp_err_t h_wifi_page(httpd_req_t *req)
              ap_ssid[0] ? ap_ssid : "<unset>",
              ip ? ip : "<none>");
     return httpd_resp_send(req, html_wifi_start, len);
+}
+
+static esp_err_t h_get_version(httpd_req_t *req)
+{
+    esp_err_t err = set_cors_headers(req);
+    if (err != ESP_OK) return err;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", FIRMWARE_VERSION);
+    cJSON_AddStringToObject(root, "commit", FIRMWARE_COMMIT);
+    cJSON_AddStringToObject(root, "branch", FIRMWARE_BRANCH);
+    cJSON_AddStringToObject(root, "date", FIRMWARE_BUILD_DATE);
+    err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return err;
 }
 
 static esp_err_t h_get_status(httpd_req_t *req)
@@ -528,6 +543,7 @@ static const uri_entry_t s_uris[] = {
     { "/api/rds",       HTTP_GET,  h_get_rds       },
     { "/api/events",    HTTP_GET,  h_sse_events    },
     { "/api/wifi",      HTTP_POST, h_post_wifi     },
+    { "/api/version",   HTTP_GET,  h_get_version   },
 };
 
 #define NUM_URIS (sizeof(s_uris) / sizeof(s_uris[0]))
