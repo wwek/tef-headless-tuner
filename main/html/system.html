@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEF6686 System</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;max-width:480px;margin:0 auto;padding:12px}
+a{color:#4ea8de}
+h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
+.card{background:#16213e;border-radius:10px;padding:14px;margin:10px 0}
+.row{display:flex;justify-content:space-between;gap:8px;margin:6px 0;align-items:center}
+.label{color:#aaa;font-size:.85em}
+.value{font-family:'Courier New',monospace;font-size:.9em;text-align:right;word-break:break-all}
+.note{font-size:.82em;color:#aaa;line-height:1.5}
+.back{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:16px}
+.lang-btn{background:none;border:1px solid #444;color:#aaa;border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;float:right;margin-top:-2px}
+.lang-btn:hover{border-color:#888;color:#eee}
+</style>
+</head>
+<body>
+<h1><span data-i18n="title">TEF6686 System</span><button class="lang-btn" id="langbtn" onclick="toggleLang()">中文</button></h1>
+
+<div class="card">
+<div class="row"><span class="label" data-i18n="version">Version</span><span class="value" id="version">--</span></div>
+<div class="row"><span class="label" data-i18n="running">Running</span><span class="value" id="running">--</span></div>
+<div class="row"><span class="label" data-i18n="boot">Boot</span><span class="value" id="boot">--</span></div>
+<div class="row"><span class="label" data-i18n="next">Next OTA</span><span class="value" id="next">--</span></div>
+</div>
+
+<div class="card">
+<div class="note" data-i18n="note">This page is intentionally read-only for now. Firmware updates are not exposed through the web UI in the current DIY/open-source phase.</div>
+</div>
+
+<div class="back">
+<a href="/" data-i18n="back_home">Back to Tuner</a>
+<a href="/wifi" data-i18n="back_wifi">Wi-Fi Settings</a>
+</div>
+
+<script>
+const LANG={
+en:{title:"TEF6686 System",version:"Version",running:"Running",boot:"Boot",next:"Next OTA",note:"This page is intentionally read-only for now. Firmware updates are not exposed through the web UI in the current DIY/open-source phase.",back_home:"Back to Tuner",back_wifi:"Wi-Fi Settings",lang_label:"中文"},
+zh:{title:"TEF6686 系统",version:"版本",running:"当前运行",boot:"启动分区",next:"下一个 OTA 槽",note:"当前这个页面有意保持只读。现阶段作为开源 DIY 项目，暂不通过 Web UI 暴露固件升级功能。",back_home:"返回调谐器",back_wifi:"Wi-Fi 设置",lang_label:"EN"}
+};
+
+let curLang='en';
+
+function applyLang(code){
+curLang=code;
+const t=LANG[code]||LANG.en;
+document.querySelectorAll('[data-i18n]').forEach(el=>{
+const k=el.getAttribute('data-i18n');
+if(t[k])el.textContent=t[k];
+});
+document.getElementById('langbtn').textContent=t.lang_label;
+document.documentElement.lang=code==='zh'?'zh-CN':'en';
+document.title=t.title;
+localStorage.setItem('lang',code);
+}
+
+function toggleLang(){applyLang(curLang==='en'?'zh':'en')}
+
+async function loadSystem(){
+try{
+const r=await fetch('/api/system');
+if(!r.ok)throw new Error(r.statusText);
+const d=await r.json();
+document.getElementById('version').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
+document.getElementById('running').textContent=d.running_partition||'--';
+document.getElementById('boot').textContent=d.boot_partition||'--';
+document.getElementById('next').textContent=d.next_partition||'--';
+}catch(_e){}
+}
+
+const saved=localStorage.getItem('lang');
+const auto=navigator.language.startsWith('zh')?'zh':'en';
+applyLang(saved||auto);
+loadSystem();
+</script>
+</body>
+</html>

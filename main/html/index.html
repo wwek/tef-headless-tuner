@@ -133,7 +133,10 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 <div class="preset-list" id="presetlist"></div>
 </div>
 
+<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
 <a class="wifi-link" href="/wifi" data-i18n="wifi_settings">Wi-Fi Settings</a>
+<a class="wifi-link" href="/system" data-i18n="system_settings">System</a>
+</div>
 <div class="footer" id="footer"></div>
 
 <script>
@@ -141,8 +144,8 @@ let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false,cu
 let repeatTimer=null;
 
 const LANG={
-en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
-zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",wifi_settings:"Wi-Fi 设置",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
+en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
+zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",wifi_settings:"Wi-Fi 设置",system_settings:"系统",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
 };
 
 let curLang='en';

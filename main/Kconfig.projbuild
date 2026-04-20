@@ -33,6 +33,7 @@ config WIFI_AP_PASSWORD
     default ""
     help
         Password for AP mode. Leave empty for open network.
+        When set, the password must be 8 to 63 characters long.
 
 config WIFI_AP_CHANNEL
     int "AP channel"

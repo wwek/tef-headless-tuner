@@ -14,13 +14,14 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_http_server
+        app_update
         tef6686
         tuner_frontend
         nvs_flash
         mbedtls
         json
         lwip
-    EMBED_TXTFILES html/index.html html/wifi.html
+    EMBED_TXTFILES html/index.html html/wifi.html html/system.html
 )
 
 # --- Build version from git ---

@@ -19,3 +19,5 @@ esp_err_t wifi_manager_clear_sta_config(void);
 void wifi_manager_register_event_cb(wifi_mgr_event_cb_t cb, void *ctx);
 void wifi_manager_get_ap_ssid(char *buf, size_t buf_len);
 bool wifi_manager_is_connected(void);
+bool wifi_manager_has_sta_config(void);
+bool wifi_manager_can_restore_sta_config(void);

@@ -45,12 +45,15 @@ input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;b
 <div id="msg"></div>
 </div>
 
-<div class="back"><a href="/" data-i18n="back">Back to Tuner</a></div>
+<div class="back" style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap">
+<a href="/" data-i18n="back">Back to Tuner</a>
+<a href="/system" data-i18n="system">System</a>
+</div>
 
 <script>
 const LANG={
-en:{title:"TEF6686 Wi-Fi Setup",ssid:"SSID",password:"Password",connect:"Connect",clear:"Clear Saved Wi-Fi",back:"Back to Tuner",lang_label:"中文",enter_ssid:"Enter SSID",connecting:"Saving and connecting...",connected:"Connected to upstream Wi-Fi. Device AP remains available.",saved_only:"Saved, but upstream connection did not succeed. Staying on device AP.",clearing:"Clearing saved Wi-Fi...",cleared:"Saved Wi-Fi credentials cleared.",failed:"Operation failed: ",mode_label:"Mode",ip_label:"IP",ap_label:"Device AP"},
-zh:{title:"TEF6686 Wi-Fi 设置",ssid:"网络名称",password:"密码",connect:"连接",clear:"清除已保存 Wi-Fi",back:"返回调谐器",lang_label:"EN",enter_ssid:"请输入网络名称",connecting:"正在保存并尝试连接...",connected:"已连上外部 Wi-Fi，设备 AP 仍保留可继续管理。",saved_only:"配置已保存，但本次未连上外部 Wi-Fi，当前仍停留在设备 AP。",clearing:"正在清除已保存 Wi-Fi...",cleared:"已清除保存的 Wi-Fi 凭据。",failed:"操作失败：",mode_label:"模式",ip_label:"IP",ap_label:"设备 AP"}
+en:{title:"TEF6686 Wi-Fi Setup",ssid:"SSID",password:"Password",connect:"Connect",clear:"Clear Saved Wi-Fi",back:"Back to Tuner",system:"System",lang_label:"中文",enter_ssid:"Enter SSID",connecting:"Validating and connecting...",connected:"Connected and saved. Device will switch to STA-only shortly.",restore:"Connection failed. Restoring the previous working Wi-Fi.",stay_ap:"Connection failed. Staying on device AP.",clearing:"Clearing saved Wi-Fi...",cleared:"Saved Wi-Fi cleared. Device will switch to AP-only.",failed:"Operation failed: ",mode_label:"Mode",ip_label:"IP",ap_label:"Device AP"},
+zh:{title:"TEF6686 Wi-Fi 设置",ssid:"网络名称",password:"密码",connect:"连接",clear:"清除已保存 Wi-Fi",back:"返回调谐器",system:"系统",lang_label:"EN",enter_ssid:"请输入网络名称",connecting:"正在验证并尝试连接...",connected:"连接成功并已保存，设备即将切到仅 STA 模式。",restore:"连接失败，正在恢复上一组可用 Wi‑Fi。",stay_ap:"连接失败，设备将继续停留在自身 AP。",clearing:"正在清除已保存 Wi-Fi...",cleared:"已清除保存的 Wi‑Fi，设备即将回到 AP-only。",failed:"操作失败：",mode_label:"模式",ip_label:"IP",ap_label:"设备 AP"}
 };
 
 let curLang='en';
@@ -108,7 +111,8 @@ let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'applicatio
 let data=await r.json().catch(()=>null);
 if(!r.ok||!data)throw new Error(r.statusText);
 renderWifiState(data);
-setMsg(data.applied?t.connected:t.saved_only,data.applied?'#2ecc71':'#f39c12');
+setMsg(data.ok?t.connected:(data.rollback?t.restore:t.stay_ap),data.ok?'#2ecc71':'#f39c12');
+setTimeout(loadWifiState,1500);
 }catch(e){
 setMsg(t.failed+e.message,'#e94560');
 }finally{
@@ -128,6 +132,7 @@ renderWifiState(data);
 document.getElementById('ssid').value='';
 document.getElementById('pass').value='';
 setMsg(t.cleared,'#2ecc71');
+setTimeout(loadWifiState,1500);
 }catch(e){
 setMsg(t.failed+e.message,'#e94560');
 }finally{

@@ -2,6 +2,8 @@
 #include "tuner_controller.h"
 #include "wifi_manager.h"
 #include "version.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -17,6 +19,8 @@ extern const char html_index_start[] asm("_binary_index_html_start");
 extern const char html_index_end[]   asm("_binary_index_html_end");
 extern const char html_wifi_start[]  asm("_binary_wifi_html_start");
 extern const char html_wifi_end[]    asm("_binary_wifi_html_end");
+extern const char html_system_start[] asm("_binary_system_html_start");
+extern const char html_system_end[]   asm("_binary_system_html_end");
 
 static httpd_handle_t s_server;
 
@@ -190,8 +194,24 @@ static void add_wifi_state(cJSON *root)
     wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
     cJSON_AddStringToObject(root, "mode", wifi_mode_name(mode));
     cJSON_AddBoolToObject(root, "connected", wifi_manager_is_connected());
+    cJSON_AddBoolToObject(root, "has_saved", wifi_manager_has_sta_config());
     cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
     cJSON_AddStringToObject(root, "ip", ip ? ip : "");
+}
+
+static void add_system_state(cJSON *root)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+
+    cJSON_AddStringToObject(root, "version", FIRMWARE_VERSION);
+    cJSON_AddStringToObject(root, "commit", FIRMWARE_COMMIT);
+    cJSON_AddStringToObject(root, "branch", FIRMWARE_BRANCH);
+    cJSON_AddStringToObject(root, "date", FIRMWARE_BUILD_DATE);
+    cJSON_AddStringToObject(root, "running_partition", running ? running->label : "");
+    cJSON_AddStringToObject(root, "boot_partition", boot ? boot->label : "");
+    cJSON_AddStringToObject(root, "next_partition", next ? next->label : "");
 }
 
 // --- URI handlers ---
@@ -228,6 +248,17 @@ static esp_err_t h_wifi_page(httpd_req_t *req)
     return httpd_resp_send(req, html_wifi_start, len);
 }
 
+static esp_err_t h_system_page(httpd_req_t *req)
+{
+    esp_err_t err = set_cors_headers(req);
+    if (err != ESP_OK) return err;
+    err = httpd_resp_set_type(req, "text/html; charset=utf-8");
+    if (err != ESP_OK) return err;
+    size_t len = html_system_end - html_system_start;
+    ESP_LOGI(TAG, "HTTP GET %s -> system page (%u bytes)", req->uri, (unsigned)len);
+    return httpd_resp_send(req, html_system_start, len);
+}
+
 static esp_err_t h_get_version(httpd_req_t *req)
 {
     esp_err_t err = set_cors_headers(req);
@@ -246,6 +277,15 @@ static esp_err_t h_get_wifi(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
     add_wifi_state(root);
+    esp_err_t err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t h_get_system(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    add_system_state(root);
     esp_err_t err = send_json_response(req, root);
     cJSON_Delete(root);
     return err;
@@ -493,7 +533,7 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "HTTP POST %s -> save STA config for SSID=%s", req->uri, jssid->valuestring);
+    ESP_LOGI(TAG, "HTTP POST %s -> validate Wi-Fi candidate for SSID=%s", req->uri, jssid->valuestring);
     esp_err_t err = wifi_manager_set_sta_config(jssid->valuestring, jpass->valuestring);
     cJSON_Delete(body);
 
@@ -504,15 +544,16 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
     }
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "ok", true);
-    cJSON_AddBoolToObject(root, "saved", true);
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    cJSON_AddBoolToObject(root, "saved", err == ESP_OK);
     cJSON_AddBoolToObject(root, "applied", err == ESP_OK);
+    cJSON_AddBoolToObject(root, "rollback", err == ESP_ERR_TIMEOUT && wifi_manager_can_restore_sta_config());
     add_wifi_state(root);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "STA config saved and applied successfully");
+        ESP_LOGI(TAG, "Wi-Fi candidate validated and promoted to active config");
     } else {
-        ESP_LOGW(TAG, "STA config saved, but connect attempt timed out; AP-only fallback active");
+        ESP_LOGW(TAG, "Wi-Fi candidate validation failed; active config unchanged");
     }
 
     esp_err_t send_err = send_json_response(req, root);
@@ -601,7 +642,9 @@ typedef struct {
 static const uri_entry_t s_uris[] = {
     { "/",              HTTP_GET,  h_index        },
     { "/wifi",          HTTP_GET,  h_wifi_page     },
+    { "/system",        HTTP_GET,  h_system_page   },
     { "/api/wifi",      HTTP_GET,  h_get_wifi      },
+    { "/api/system",    HTTP_GET,  h_get_system    },
     { "/api/status",    HTTP_GET,  h_get_status    },
     { "/api/tune",      HTTP_POST, h_post_tune     },
     { "/api/seek",      HTTP_POST, h_post_seek     },
@@ -622,7 +665,7 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size        = 8192;
-    config.max_uri_handlers  = 16;
+    config.max_uri_handlers  = 18;
     config.max_resp_headers  = 8;
     config.uri_match_fn      = httpd_uri_match_wildcard;
 
