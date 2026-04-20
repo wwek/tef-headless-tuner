@@ -142,6 +142,7 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 <script>
 let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false,curBw=0;
 let repeatTimer=null;
+let sse=null;
 
 const LANG={
 en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
@@ -346,12 +347,25 @@ el.appendChild(div);
 }
 
 function connectSSE(){
-let es=new EventSource('/api/events');
-es.addEventListener('status',e=>{updateStatus(JSON.parse(e.data))});
-es.addEventListener('rds',e=>{updateRDS(JSON.parse(e.data))});
-es.addEventListener('quality',e=>{updateQuality(JSON.parse(e.data))});
-es.onopen=()=>{document.getElementById('conn').className='status-dot on'};
-es.onerror=()=>{document.getElementById('conn').className='status-dot off';es.close();setTimeout(connectSSE,3000)};
+if(sse)return;
+sse=new EventSource('/api/events');
+sse.addEventListener('status',e=>{updateStatus(JSON.parse(e.data))});
+sse.addEventListener('rds',e=>{updateRDS(JSON.parse(e.data))});
+sse.addEventListener('quality',e=>{updateQuality(JSON.parse(e.data))});
+sse.onopen=()=>{document.getElementById('conn').className='status-dot on'};
+sse.onerror=()=>{
+document.getElementById('conn').className='status-dot off';
+if(sse){sse.close();sse=null;}
+setTimeout(()=>{if(!document.hidden)connectSSE();},3000);
+};
+}
+
+function disconnectSSE(){
+if(sse){
+sse.close();
+sse=null;
+}
+document.getElementById('conn').className='status-dot off';
 }
 
 const saved=localStorage.getItem('lang');
@@ -362,6 +376,11 @@ connectSSE();
 fetch('/api/version').then(r=>r.json()).then(d=>{
 document.getElementById('footer').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
 }).catch(()=>{});
+document.addEventListener('visibilitychange',()=>{
+if(document.hidden)disconnectSSE();
+else connectSSE();
+});
+window.addEventListener('beforeunload',disconnectSSE);
 </script>
 </body>
 </html>

@@ -25,7 +25,7 @@ idf_component_register(
 )
 
 # --- Build version from git ---
-set(FIRMWARE_VERSION "0.1.0")
+set(FIRMWARE_VERSION "0.1.1")
 
 execute_process(
     COMMAND git rev-parse --short HEAD

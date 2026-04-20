@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "cJSON.h"
 #include <string.h>
 #include <stdlib.h>
@@ -23,6 +24,8 @@ extern const char html_system_start[] asm("_binary_system_html_start");
 extern const char html_system_end[]   asm("_binary_system_html_end");
 
 static httpd_handle_t s_server;
+
+static esp_err_t set_cors_headers(httpd_req_t *req);
 
 static const char *wifi_mode_name(wifi_mgr_mode_t mode)
 {
@@ -41,30 +44,28 @@ static const char *wifi_mode_name(wifi_mgr_mode_t mode)
 // --- SSE ---
 
 #define MAX_SSE_CLIENTS 4
-#define SSE_QUEUE_LEN   8
-#define SSE_ITEM_SIZE   sizeof(char *)
+#define SSE_REQ_QUEUE_LEN   MAX_SSE_CLIENTS
+#define SSE_REQ_ITEM_SIZE   sizeof(httpd_req_t *)
+#define SSE_MSG_QUEUE_LEN   16
+#define SSE_MSG_ITEM_SIZE   sizeof(char *)
+#define SSE_WORKER_STACK 4096
+#define SSE_WORKER_PRIO  5
+#define SSE_KEEPALIVE_MS 1000
 
 typedef struct {
     httpd_req_t *req;
-    QueueHandle_t queue;
     bool active;
 } sse_client_t;
 
 static sse_client_t s_sse_clients[MAX_SSE_CLIENTS];
+static QueueHandle_t s_sse_req_queue;
+static QueueHandle_t s_sse_msg_queue;
+static TaskHandle_t s_sse_worker_task;
 
 static void sse_remove_client(int idx)
 {
     if (idx < 0 || idx >= MAX_SSE_CLIENTS) return;
     sse_client_t *c = &s_sse_clients[idx];
-    if (c->queue) {
-        // Drain remaining items
-        char *msg;
-        while (xQueueReceive(c->queue, &msg, 0) == pdTRUE) {
-            free(msg);
-        }
-        vQueueDelete(c->queue);
-        c->queue = NULL;
-    }
     c->req = NULL;
     c->active = false;
 }
@@ -77,6 +78,36 @@ static int sse_find_slot(void)
     return -1;
 }
 
+static void sse_complete_client(int idx)
+{
+    if (idx < 0 || idx >= MAX_SSE_CLIENTS) {
+        return;
+    }
+    sse_client_t *c = &s_sse_clients[idx];
+    if (c->req) {
+        httpd_req_async_handler_complete(c->req);
+    }
+    sse_remove_client(idx);
+}
+
+static void sse_send_to_active_clients(const char *msg)
+{
+    if (!s_server) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+        sse_client_t *c = &s_sse_clients[i];
+        if (!c->active || !c->req) {
+            continue;
+        }
+        esp_err_t err = httpd_resp_send_chunk(c->req, msg, strlen(msg));
+        if (err != ESP_OK) {
+            sse_complete_client(i);
+        }
+    }
+}
+
 static void sse_broadcast(const char *event, const char *json)
 {
     // Format: "event: <name>\ndata: <json>\n\n"
@@ -84,17 +115,70 @@ static void sse_broadcast(const char *event, const char *json)
     char *msg = malloc(len);
     if (!msg) return;
     snprintf(msg, len, "event: %s\ndata: %s\n\n", event, json);
+    if (!s_sse_msg_queue || xQueueSend(s_sse_msg_queue, &msg, 0) != pdTRUE) {
+        free(msg);
+    }
+}
 
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
-        sse_client_t *c = &s_sse_clients[i];
-        if (!c->active || !c->queue) continue;
-        char *copy = strdup(msg);
-        if (!copy) continue;
-        if (xQueueSend(c->queue, &copy, 0) != pdTRUE) {
-            free(copy);
+static void sse_worker(void *ctx)
+{
+    (void)ctx;
+    for (;;) {
+        httpd_req_t *async_req = NULL;
+        while (xQueueReceive(s_sse_req_queue, &async_req, 0) == pdTRUE) {
+            if (!async_req) {
+                continue;
+            }
+
+            int slot = sse_find_slot();
+            if (slot < 0) {
+                httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "too many SSE clients");
+                httpd_req_async_handler_complete(async_req);
+                continue;
+            }
+
+            s_sse_clients[slot].req = async_req;
+            s_sse_clients[slot].active = true;
+
+            if (set_cors_headers(async_req) != ESP_OK ||
+                httpd_resp_set_type(async_req, "text/event-stream") != ESP_OK ||
+                httpd_resp_set_hdr(async_req, "Cache-Control", "no-cache") != ESP_OK ||
+                httpd_resp_set_hdr(async_req, "Connection", "keep-alive") != ESP_OK ||
+                httpd_resp_send_chunk(async_req, ": connected\n\n", strlen(": connected\n\n")) != ESP_OK) {
+                sse_complete_client(slot);
+            }
+        }
+
+        char *msg = NULL;
+        if (xQueueReceive(s_sse_msg_queue, &msg, pdMS_TO_TICKS(SSE_KEEPALIVE_MS)) == pdTRUE) {
+            if (msg) {
+                sse_send_to_active_clients(msg);
+                free(msg);
+            }
+        } else {
+            sse_send_to_active_clients(": keepalive\n\n");
         }
     }
-    free(msg);
+}
+
+static esp_err_t sse_submit_async(httpd_req_t *req)
+{
+    if (!s_sse_req_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    httpd_req_t *copy = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &copy);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (xQueueSend(s_sse_req_queue, &copy, pdMS_TO_TICKS(100)) != pdTRUE) {
+        httpd_req_async_handler_complete(copy);
+        return ESP_ERR_HTTPD_HANDLERS_FULL;
+    }
+
+    return ESP_OK;
 }
 
 // Status callback registered with cmd_handler
@@ -537,6 +621,11 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
     esp_err_t err = wifi_manager_set_sta_config(jssid->valuestring, jpass->valuestring);
     cJSON_Delete(body);
 
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid wifi parameters");
+        return ESP_FAIL;
+    }
+
     if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
         ESP_LOGE(TAG, "wifi config failed: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "wifi config failed");
@@ -584,51 +673,17 @@ static esp_err_t h_post_wifi_clear(httpd_req_t *req)
 // SSE handler: long-lived connection
 static esp_err_t h_sse_events(httpd_req_t *req)
 {
-    esp_err_t err = set_cors_headers(req);
-    if (err != ESP_OK) return err;
-    err = httpd_resp_set_type(req, "text/event-stream");
-    if (err != ESP_OK) return err;
-    err = httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    if (err != ESP_OK) return err;
-    err = httpd_resp_set_hdr(req, "Connection", "keep-alive");
-    if (err != ESP_OK) return err;
-
-    int slot = sse_find_slot();
-    if (slot < 0) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "too many SSE clients");
-        return ESP_FAIL;
+    esp_err_t err = sse_submit_async(req);
+    if (err == ESP_OK) {
+        return ESP_OK;
     }
-
-    QueueHandle_t q = xQueueCreate(SSE_QUEUE_LEN, SSE_ITEM_SIZE);
-    if (!q) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "queue create failed");
-        return ESP_FAIL;
+    if (err == ESP_ERR_HTTPD_HANDLERS_FULL) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "too many SSE clients");
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sse unavailable");
     }
-
-    s_sse_clients[slot].req = req;
-    s_sse_clients[slot].queue = q;
-    s_sse_clients[slot].active = true;
-
-    // Send initial connection ack
-    httpd_resp_send_chunk(req, ": connected\n\n", strlen(": connected\n\n"));
-
-    char *msg;
-    while (1) {
-        if (xQueueReceive(q, &msg, pdMS_TO_TICKS(500)) == pdTRUE) {
-            esp_err_t send_err = httpd_resp_send_chunk(req, msg, strlen(msg));
-            free(msg);
-            if (send_err != ESP_OK) break;
-        } else {
-            // Keepalive
-            if (httpd_resp_send_chunk(req, ": keepalive\n\n", strlen(": keepalive\n\n")) != ESP_OK) {
-                break;
-            }
-        }
-    }
-
-    // Cleanup
-    sse_remove_client(slot);
-    return ESP_OK;
+    return ESP_FAIL;
 }
 
 // --- Registration ---
@@ -682,6 +737,34 @@ esp_err_t web_server_start(void)
         return err;
     }
 
+    s_sse_req_queue = xQueueCreate(SSE_REQ_QUEUE_LEN, SSE_REQ_ITEM_SIZE);
+    s_sse_msg_queue = xQueueCreate(SSE_MSG_QUEUE_LEN, SSE_MSG_ITEM_SIZE);
+    if (!s_sse_req_queue || !s_sse_msg_queue) {
+        if (s_sse_req_queue) {
+            vQueueDelete(s_sse_req_queue);
+            s_sse_req_queue = NULL;
+        }
+        if (s_sse_msg_queue) {
+            vQueueDelete(s_sse_msg_queue);
+            s_sse_msg_queue = NULL;
+        }
+        httpd_stop(s_server);
+        s_server = NULL;
+        ESP_LOGE(TAG, "failed to create SSE worker resources");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(sse_worker, "sse_worker", SSE_WORKER_STACK, NULL, SSE_WORKER_PRIO, &s_sse_worker_task) != pdPASS) {
+        vQueueDelete(s_sse_req_queue);
+        s_sse_req_queue = NULL;
+        vQueueDelete(s_sse_msg_queue);
+        s_sse_msg_queue = NULL;
+        httpd_stop(s_server);
+        s_server = NULL;
+        ESP_LOGE(TAG, "failed to create SSE worker task");
+        return ESP_ERR_NO_MEM;
+    }
+
     for (size_t i = 0; i < NUM_URIS; i++) {
         httpd_uri_t uri = {
             .uri      = s_uris[i].uri,
@@ -711,8 +794,31 @@ void web_server_stop(void)
 
     for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
         if (s_sse_clients[i].active) {
-            sse_remove_client(i);
+            sse_complete_client(i);
         }
+    }
+
+    if (s_sse_worker_task) {
+        vTaskDelete(s_sse_worker_task);
+        s_sse_worker_task = NULL;
+    }
+    if (s_sse_req_queue) {
+        httpd_req_t *pending_req = NULL;
+        while (xQueueReceive(s_sse_req_queue, &pending_req, 0) == pdTRUE) {
+            if (pending_req) {
+                httpd_req_async_handler_complete(pending_req);
+            }
+        }
+        vQueueDelete(s_sse_req_queue);
+        s_sse_req_queue = NULL;
+    }
+    if (s_sse_msg_queue) {
+        char *pending_msg = NULL;
+        while (xQueueReceive(s_sse_msg_queue, &pending_msg, 0) == pdTRUE) {
+            free(pending_msg);
+        }
+        vQueueDelete(s_sse_msg_queue);
+        s_sse_msg_queue = NULL;
     }
 
     httpd_stop(s_server);

@@ -18,6 +18,10 @@ ESP32-S3 firmware for a headless TEF6686-based tuner with multiple control inter
 
 Wi-Fi supports AP mode (direct connection) and STA mode (join existing network), with automatic fallback.
 
+The default repository configuration targets an `ESP32-S3` board with `16MB` flash
+(for example an `N16R8` module or equivalent). If you use a smaller flash variant,
+you must adjust `sdkconfig` and `partitions.csv` before flashing.
+
 ## Status
 
 This project is still in active development.
@@ -69,7 +73,7 @@ Current repository scope:
 ## Requirements
 
 - ESP-IDF 5.x or a compatible environment with `idf.py`
-- An `ESP32-S3` board with native USB device support
+- An `ESP32-S3` board with native USB device support and `16MB` flash for the default repository configuration
 - A TEF6686 or compatible TEF668X tuner module wired over I2C
 - Audio wiring that matches the configured I2S input path if USB audio is enabled
 
