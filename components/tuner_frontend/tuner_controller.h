@@ -14,6 +14,23 @@ typedef struct {
     bool seeking;
 } tuner_state_t;
 
+typedef enum {
+    TUNER_XDR_AUDIO_MODE_STEREO_AUTO = 0,
+    TUNER_XDR_AUDIO_MODE_FORCED_MONO,
+    TUNER_XDR_AUDIO_MODE_MPX,
+} tuner_xdr_audio_mode_t;
+
+typedef struct {
+    uint8_t agc_index;
+    tuner_xdr_audio_mode_t audio_mode;
+    bool ims_enabled;
+    bool eq_enabled;
+    bool softmute_fm;
+    bool softmute_am;
+    uint16_t fm_bandwidth_khz;
+    uint8_t antenna_index;
+} tuner_xdr_settings_t;
+
 typedef void (*status_cb_t)(const tuner_state_t *state, bool rds_changed, void *ctx);
 
 esp_err_t tuner_controller_start(void);
@@ -37,7 +54,16 @@ esp_err_t tuner_controller_set_audio(bool on);
 esp_err_t tuner_controller_set_power(bool on);
 esp_err_t tuner_controller_set_deemphasis(uint16_t timeconstant);
 esp_err_t tuner_controller_set_softmute_fm(bool on);
+esp_err_t tuner_controller_set_softmute_am(bool on);
 esp_err_t tuner_controller_set_bandwidth_fm(uint16_t bandwidth_khz);
+esp_err_t tuner_controller_set_agc_index(uint8_t index);
+esp_err_t tuner_controller_set_xdr_audio_mode(tuner_xdr_audio_mode_t mode);
+esp_err_t tuner_controller_set_xdr_eq(bool ims_enabled, bool eq_enabled);
+esp_err_t tuner_controller_set_antenna(uint8_t antenna_index);
+esp_err_t tuner_controller_set_auto_squelch(bool on);
+esp_err_t tuner_controller_set_squelch(int16_t threshold_db);
+esp_err_t tuner_controller_set_scan_mute(bool mute);
+void tuner_controller_get_xdr_settings(tuner_xdr_settings_t *settings);
 
 esp_err_t tuner_controller_get_stereo_status(tef_stereo_status_t *st);
 esp_err_t tuner_controller_get_rds_data(tef_rds_raw_t *rds);

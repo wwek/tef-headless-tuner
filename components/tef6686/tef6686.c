@@ -29,6 +29,7 @@ static const char *TAG = "tef6686";
 #define RADIO_SET_BANDWIDTH   10
 #define RADIO_SET_RFAGC       11
 #define RADIO_SET_ANTENNA     12
+#define RADIO_SET_COCHAN      14
 #define RADIO_SET_MPH_SUP     20
 #define RADIO_SET_CHAN_EQ     22
 #define RADIO_SET_NB          23
@@ -38,12 +39,23 @@ static const char *TAG = "tef6686";
 #define RADIO_SET_LEVEL_OFF   39
 #define RADIO_SET_SOFTMUTE    45
 #define RADIO_SET_HC_LEVEL    52
+#define RADIO_SET_HC_NOISE    53
+#define RADIO_SET_HC_MPH      54
 #define RADIO_SET_HC_MAX      55
 #define RADIO_SET_ST_LEVEL    62
+#define RADIO_SET_ST_NOISE    63
+#define RADIO_SET_ST_MPH      64
 #define RADIO_SET_ST_MIN      66
+#define RADIO_SET_STHB_LEVEL  72
+#define RADIO_SET_STHB_NOISE  73
+#define RADIO_SET_STHB_MPH    74
+#define RADIO_SET_STHB_MAX    75
 #define RADIO_SET_RDS         81
 #define RADIO_SET_SPECIALS    85
 #define RADIO_SET_BW_OPTIONS  86
+#define RADIO_SET_STB_TIME    90
+#define RADIO_SET_STB_GAIN    91
+#define RADIO_SET_STB_BIAS    92
 #define RADIO_GET_QUAL_STATUS 128
 #define RADIO_GET_QUAL_DATA   129
 #define RADIO_GET_RDS_STATUS  130
@@ -86,6 +98,7 @@ static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
 static tef_band_t s_current_band = TEF_BAND_FM;
 static uint32_t s_current_freq = 87500;
+static bool s_mpx_mode;
 
 static const char *band_names[] = {"FM", "LW", "MW", "SW"};
 
@@ -305,7 +318,7 @@ static esp_err_t tef_load_init_tab(void)
     return ESP_OK;
 }
 
-// --- Public API ---
+// --- Public API: Initialization and power ---
 
 esp_err_t tef6686_init(const tef_config_t *config)
 {
@@ -339,7 +352,6 @@ esp_err_t tef6686_init(const tef_config_t *config)
 
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    // Full initialization sequence
     err = tef_load_patch(config->chip_version);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Patch load failed: %s", esp_err_to_name(err));
@@ -352,7 +364,6 @@ esp_err_t tef6686_init(const tef_config_t *config)
         return err;
     }
 
-    // Power on
     err = tef6686_set_power(true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Power on failed: %s", esp_err_to_name(err));
@@ -367,7 +378,6 @@ esp_err_t tef6686_init(const tef_config_t *config)
         return err;
     }
 
-    // Read identification
     uint16_t device, hw_ver, sw_ver;
     if (tef6686_get_identification(&device, &hw_ver, &sw_ver) == ESP_OK) {
         ESP_LOGI(TAG, "TEF device=%04X hw=%04X sw=%04X", device, hw_ver, sw_ver);
@@ -380,14 +390,29 @@ esp_err_t tef6686_init(const tef_config_t *config)
 
 esp_err_t tef6686_set_power(bool on)
 {
-    return tef_send_cmd(MOD_APPL, APPL_SET_OP_MODE, 1, on ? 1 : 0);
+    esp_err_t err = tef_send_cmd(MOD_APPL, APPL_SET_OP_MODE, 1, on ? 1 : 0);
+    if (err == ESP_OK && !on) {
+        // Park the demodulator at 10 MHz on power off
+        tef_send_cmd(MOD_FM, RADIO_TUNE_TO, 2, 1, 10000);
+    }
+    return err;
 }
+
+esp_err_t tef6686_get_op_status(uint8_t *bootstatus)
+{
+    if (!bootstatus) return ESP_ERR_INVALID_ARG;
+    uint16_t data[1] = {0};
+    esp_err_t err = tef_read_cmd(MOD_APPL, APPL_GET_OP_STATUS, data, 1);
+    if (err != ESP_OK) return err;
+    *bootstatus = (uint8_t)data[0];
+    return ESP_OK;
+}
+
+// --- Public API: Tuning ---
 
 esp_err_t tef6686_tune_fm(uint32_t freq_khz)
 {
     uint16_t tef_freq = (uint16_t)(freq_khz / 10U);
-
-    // FM tune uses 10 kHz units in the TEF command interface.
     esp_err_t err = tef_send_cmd(MOD_FM, RADIO_TUNE_TO, 2, 4, tef_freq);
     if (err == ESP_OK) {
         s_current_band = TEF_BAND_FM;
@@ -398,8 +423,7 @@ esp_err_t tef6686_tune_fm(uint32_t freq_khz)
 
 esp_err_t tef6686_tune_am(uint32_t freq_khz)
 {
-    // AM tune: module=AM, cmd=TUNE_TO, words=[1, freq_khz]
-    esp_err_t err = tef_send_cmd(MOD_AM, RADIO_TUNE_TO, 2, 1, freq_khz);
+    esp_err_t err = tef_send_cmd(MOD_AM, RADIO_TUNE_TO, 2, 1, (uint16_t)freq_khz);
     if (err == ESP_OK) {
         s_current_band = tef_infer_am_band(freq_khz);
         s_current_freq = freq_khz;
@@ -412,21 +436,165 @@ esp_err_t tef6686_set_band(tef_band_t band)
     if (band < TEF_BAND_FM || band > TEF_BAND_SW) {
         return ESP_ERR_INVALID_ARG;
     }
-
     s_current_band = band;
     return ESP_OK;
 }
 
+// --- Public API: Audio control ---
+
 esp_err_t tef6686_set_volume(uint8_t volume)
 {
     if (volume > 30) volume = 30;
-    // Volume is in 0.1 dB units: volume * 10
     return tef_send_cmd(MOD_AUDIO, AUDIO_SET_VOLUME, 1, (int)(volume * 10));
 }
 
 esp_err_t tef6686_set_mute(bool mute)
 {
+    if (s_mpx_mode) {
+        tef_send_cmd(MOD_FM, RADIO_SET_SPECIALS, 1, mute ? 0 : 1);
+    }
     return tef_send_cmd(MOD_AUDIO, AUDIO_SET_MUTE, 1, mute ? 1 : 0);
+}
+
+esp_err_t tef6686_set_specials(uint16_t audio)
+{
+    esp_err_t err = tef_send_cmd(MOD_FM, RADIO_SET_SPECIALS, 1, audio);
+    if (err == ESP_OK) {
+        s_mpx_mode = (audio != 0);
+    }
+    return err;
+}
+
+esp_err_t tef6686_set_wavegen(bool on, int16_t amplitude, uint16_t freq)
+{
+    if (on) {
+        tef_send_cmd(MOD_AUDIO, AUDIO_SET_INPUT, 1, 240);
+        return tef_send_cmd(MOD_AUDIO, AUDIO_SET_WAVEGEN, 6, 5, 0, (int)(amplitude * 10), freq, (int)(amplitude * 10), freq);
+    }
+    tef_send_cmd(MOD_AUDIO, AUDIO_SET_INPUT, 1, 0);
+    return tef_send_cmd(MOD_AUDIO, AUDIO_SET_WAVEGEN, 6, 0, 0, 0, 0, 0, 0);
+}
+
+esp_err_t tef6686_set_i2s_input(bool on)
+{
+    return tef_send_cmd(MOD_AUDIO, AUDIO_SET_INPUT, 1, on ? 32 : 0);
+}
+
+// --- Public API: FM signal processing ---
+
+esp_err_t tef6686_set_bandwidth_fm(uint16_t bandwidth_khz)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_BANDWIDTH, 2, 0, (int)(bandwidth_khz * 10));
+}
+
+esp_err_t tef6686_set_bandwidth_fm_auto(void)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_BANDWIDTH, 2, 1, 3110);
+}
+
+esp_err_t tef6686_extend_bandwidth(bool on)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_BW_OPTIONS, 1, on ? 400 : 950);
+}
+
+esp_err_t tef6686_set_deemphasis(uint16_t timeconstant)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_DEEMPH, 1, timeconstant);
+}
+
+esp_err_t tef6686_set_agc(uint8_t agc)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_RFAGC, 2, (int)(agc * 10), 0);
+}
+
+esp_err_t tef6686_set_softmute_fm(bool on)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_SOFTMUTE, 2, on ? 1 : 0, 200);
+}
+
+esp_err_t tef6686_set_mono(bool mono)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_ST_MIN, 1, mono ? 2 : 0);
+}
+
+esp_err_t tef6686_set_offset(int8_t offset)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_LEVEL_OFF, 1, (int)(offset * 10 - 70));
+}
+
+esp_err_t tef6686_set_fm_noise_blanker(uint16_t start)
+{
+    if (start == 0) {
+        return tef_send_cmd(MOD_FM, RADIO_SET_NB, 2, 0, 1000);
+    }
+    return tef_send_cmd(MOD_FM, RADIO_SET_NB, 2, 1, (int)(start * 10));
+}
+
+esp_err_t tef6686_set_high_cut_level(uint16_t limit)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_HC_MAX, 2, 1, (int)(limit * 100));
+}
+
+esp_err_t tef6686_set_high_cut_offset(uint8_t start)
+{
+    uint8_t mode = (start == 0) ? 0 : 3;
+    tef_send_cmd(MOD_FM, RADIO_SET_HC_LEVEL, 3, mode, (int)(start * 10), 300);
+    tef_send_cmd(MOD_FM, RADIO_SET_HC_NOISE, 3, mode, 360, 300);
+    return tef_send_cmd(MOD_FM, RADIO_SET_HC_MPH, 3, mode, 360, 300);
+}
+
+esp_err_t tef6686_set_stereo_level(uint8_t start)
+{
+    uint8_t mode = (start == 0) ? 0 : 3;
+    tef_send_cmd(MOD_FM, RADIO_SET_ST_LEVEL, 3, mode, (int)(start * 10), 60);
+    tef_send_cmd(MOD_FM, RADIO_SET_ST_NOISE, 3, mode, 240, 200);
+    return tef_send_cmd(MOD_FM, RADIO_SET_ST_MPH, 3, mode, 240, 200);
+}
+
+esp_err_t tef6686_set_st_hi_blend_level(uint16_t limit)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_STHB_MAX, 2, 1, (int)(limit * 100));
+}
+
+esp_err_t tef6686_set_st_hi_blend_offset(uint8_t start)
+{
+    uint8_t mode = (start == 0) ? 0 : 3;
+    tef_send_cmd(MOD_FM, RADIO_SET_STHB_LEVEL, 3, mode, (int)(start * 10), 300);
+    tef_send_cmd(MOD_FM, RADIO_SET_STHB_NOISE, 3, mode, 360, 300);
+    return tef_send_cmd(MOD_FM, RADIO_SET_STHB_MPH, 3, mode, 360, 300);
+}
+
+esp_err_t tef6686_set_mph_suppression(bool on)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_MPH_SUP, 1, on ? 1 : 0);
+}
+
+esp_err_t tef6686_set_channel_eq(bool on)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_CHAN_EQ, 1, on ? 1 : 0);
+}
+
+esp_err_t tef6686_set_stereo_improvement(uint8_t mode)
+{
+    if (mode == 2) {
+        return tef_send_cmd(MOD_FM, RADIO_SET_SI, 1, 1);
+    }
+    return tef_send_cmd(MOD_FM, RADIO_SET_SI, 1, 0);
+}
+
+esp_err_t tef6686_set_si_blend_time(uint16_t attack, uint16_t decay)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_STB_TIME, 2, attack, decay);
+}
+
+esp_err_t tef6686_set_si_blend_gain(uint16_t b1, uint16_t b2, uint16_t b3, uint16_t b4)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_STB_GAIN, 4, (int)(b1 * 10), (int)(b2 * 10), (int)(b3 * 10), (int)(b4 * 10));
+}
+
+esp_err_t tef6686_set_si_blend_bias(int16_t b1, int16_t b2, int16_t b3, int16_t b4)
+{
+    return tef_send_cmd(MOD_FM, RADIO_SET_STB_BIAS, 4, b1 - 250, b2 - 250, b3 - 250, b4 - 250);
 }
 
 esp_err_t tef6686_set_rds(bool full_search)
@@ -437,23 +605,65 @@ esp_err_t tef6686_set_rds(bool full_search)
     return tef_send_cmd(MOD_FM, RADIO_SET_RDS, 3, 1, 1, 0);
 }
 
-esp_err_t tef6686_set_deemphasis(uint16_t timeconstant)
+// --- Public API: AM signal processing ---
+
+esp_err_t tef6686_set_bandwidth_am(uint16_t bandwidth_khz)
 {
-    return tef_send_cmd(MOD_FM, RADIO_SET_DEEMPH, 1, timeconstant);
+    return tef_send_cmd(MOD_AM, RADIO_SET_BANDWIDTH, 2, 0, (int)(bandwidth_khz * 10));
 }
 
-esp_err_t tef6686_set_softmute_fm(bool on)
+esp_err_t tef6686_set_am_agc(uint8_t agc)
 {
-    if (on) {
-        return tef_send_cmd(MOD_FM, RADIO_SET_SOFTMUTE, 2, 1, 200);
+    return tef_send_cmd(MOD_AM, RADIO_SET_RFAGC, 2, (int)(agc * 10), 0);
+}
+
+esp_err_t tef6686_set_am_offset(int8_t offset)
+{
+    return tef_send_cmd(MOD_AM, RADIO_SET_LEVEL_OFF, 1, (int)(offset * 10 - 70));
+}
+
+esp_err_t tef6686_set_softmute_am(bool on)
+{
+    return tef_send_cmd(MOD_AM, RADIO_SET_SOFTMUTE, 2, on ? 1 : 0, 250);
+}
+
+esp_err_t tef6686_set_am_noise_blanker(uint16_t start)
+{
+    if (start == 0) {
+        tef_send_cmd(MOD_AM, RADIO_SET_NB, 2, 0, 1000);
+        return tef_send_cmd(MOD_AM, RADIO_SET_NB_AUDIO, 2, 0, 1000);
     }
-    return tef_send_cmd(MOD_FM, RADIO_SET_SOFTMUTE, 2, 0, 200);
+    tef_send_cmd(MOD_AM, RADIO_SET_NB, 2, 1, (int)(start * 10));
+    return tef_send_cmd(MOD_AM, RADIO_SET_NB_AUDIO, 2, 1, 1000);
 }
 
-esp_err_t tef6686_set_bandwidth_fm(uint16_t bandwidth_khz)
+esp_err_t tef6686_set_am_cochannel(uint16_t start, uint8_t level)
 {
-    return tef_send_cmd(MOD_FM, RADIO_SET_BANDWIDTH, 1, bandwidth_khz);
+    if (start == 0) {
+        return tef_send_cmd(MOD_AM, RADIO_SET_COCHAN, 5, 0, 2, (int)(start * 10), 1000, level);
+    }
+    return tef_send_cmd(MOD_AM, RADIO_SET_COCHAN, 5, 1, 2, (int)(start * 10), 1000, level);
 }
+
+esp_err_t tef6686_set_am_attenuation(uint16_t start)
+{
+    return tef_send_cmd(MOD_AM, RADIO_SET_ANTENNA, 1, (int)(start * 10));
+}
+
+// --- Public API: Hardware ---
+
+esp_err_t tef6686_set_gpio(uint8_t mode)
+{
+    switch (mode) {
+        case 0: return tef_send_cmd(MOD_APPL, APPL_SET_GPIO, 3, 0, 33, 2);
+        case 1: return tef_send_cmd(MOD_APPL, APPL_SET_GPIO, 3, 0, 33, 3);
+        case 2: return tef_send_cmd(MOD_APPL, APPL_SET_GPIO, 3, 0, 32, 2);
+        case 3: return tef_send_cmd(MOD_APPL, APPL_SET_GPIO, 3, 0, 32, 3);
+        default: return ESP_ERR_INVALID_ARG;
+    }
+}
+
+// --- Public API: Status reads ---
 
 esp_err_t tef6686_get_quality(tef_quality_t *quality)
 {
@@ -471,11 +681,9 @@ esp_err_t tef6686_get_quality(tef_quality_t *quality)
     quality->bandwidth = data[5] / 10;
     quality->modulation = data[6] / 10;
 
-    // Clamp level
     if (quality->level < -200) quality->level = -200;
     if (quality->level > 1200) quality->level = 1200;
 
-    // Estimate SNR (from PE5PVB formula)
     quality->snr = (int8_t)(0.46222375f * (float)quality->level / 10.0f
                           - 0.082495118f * (float)quality->usn / 10.0f + 10.0f);
 
@@ -516,8 +724,33 @@ esp_err_t tef6686_get_stereo_status(tef_stereo_status_t *st)
     if (err != ESP_OK) return err;
 
     st->stereo = (data[0] & 0x8000) != 0;
-    // Stereo blend is read from processing status, simplified here
-    st->stereo_blend = 0;
+
+    // Read stereo blend from processing status
+    tef_processing_t proc;
+    if (tef6686_get_processing(&proc) == ESP_OK) {
+        st->stereo_blend = proc.stereo;
+    } else {
+        st->stereo_blend = 0;
+    }
+    return ESP_OK;
+}
+
+esp_err_t tef6686_get_processing(tef_processing_t *proc)
+{
+    if (!proc) return ESP_ERR_INVALID_ARG;
+
+    uint16_t data[6] = {0};
+    esp_err_t err = tef_read_cmd(MOD_FM, RADIO_GET_PROC_STATUS, data, 6);
+    if (err != ESP_OK) return err;
+
+    proc->highcut = data[1] / 10;
+    proc->stereo = data[2] / 10;
+    proc->st_hi_blend = data[3] / 10;
+    proc->st_band[0] = (uint8_t)(data[4] >> 8);
+    proc->st_band[1] = (uint8_t)(data[4] & 0xFF);
+    proc->st_band[2] = (uint8_t)(data[5] >> 8);
+    proc->st_band[3] = (uint8_t)(data[5] & 0xFF);
+
     return ESP_OK;
 }
 
