@@ -21,6 +21,7 @@ h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
 .badge.stereo{background:#2ecc71;color:#000}
 .badge.mono{background:#555;color:#ccc}
 .band-label{font-size:.9em;color:#aaa;text-align:center;margin-top:-4px}
+.bw-label{font-size:.8em;color:#888;text-align:center;margin-top:2px}
 .btn{background:#0f3460;color:#eee;border:none;border-radius:6px;padding:8px 14px;font-size:.95em;cursor:pointer;min-width:44px;transition:background .15s}
 .btn:hover{background:#1a5276}
 .btn:active{background:#0b2545}
@@ -28,6 +29,9 @@ h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
 .btn.accent:hover{background:#d63851}
 .btn:disabled{opacity:.4;cursor:default}
 .btn.muted-active{background:#e94560}
+.btn.sm{padding:5px 10px;font-size:.82em;min-width:32px}
+.btn.del{background:transparent;color:#e74c3c;padding:5px 8px;min-width:auto}
+.btn.del:hover{background:#e74c3c22}
 input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;border-radius:6px;padding:6px 8px;font-size:.95em;width:100%}
 .meter{height:14px;background:#0a0a1a;border-radius:7px;overflow:hidden;flex:1}
 .meter-fill{height:100%;border-radius:7px;transition:width .3s,background .3s}
@@ -48,6 +52,12 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 .lang-btn:hover{border-color:#888;color:#eee}
 .wifi-link{font-size:.85em}
 .footer{text-align:center;font-size:.7em;color:#555;margin-top:12px;padding:8px 0}
+.preset-list{max-height:200px;overflow-y:auto;margin-top:8px}
+.preset-item{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;background:#0a1628;margin:3px 0;cursor:pointer;transition:background .15s}
+.preset-item:hover{background:#0f3460}
+.preset-item .preset-freq{font-family:'Courier New',monospace;flex:1;font-size:.95em}
+.preset-item .preset-band{font-size:.75em;color:#888;min-width:28px}
+.preset-empty{color:#555;text-align:center;font-size:.85em;padding:10px 0}
 </style>
 </head>
 <body>
@@ -62,6 +72,7 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 <div class="card">
 <div class="freq" id="freq" onclick="focusFreqInput()">--.-<span class="unit">MHz</span></div>
 <div class="band-label" id="band">FM</div>
+<div class="bw-label" id="bwlabel"></div>
 </div>
 
 <div class="card">
@@ -114,16 +125,24 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 </div>
 </div>
 
+<div class="card" id="presetcard">
+<div class="row center" style="margin-bottom:8px">
+<span style="flex:1;font-weight:600" data-i18n="presets">Presets</span>
+<button class="btn sm" onclick="savePreset()" data-i18n="save_preset">Save</button>
+</div>
+<div class="preset-list" id="presetlist"></div>
+</div>
+
 <a class="wifi-link" href="/wifi" data-i18n="wifi_settings">Wi-Fi Settings</a>
 <div class="footer" id="footer"></div>
 
 <script>
-let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false;
+let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false,curBw=0;
 let repeatTimer=null;
 
 const LANG={
-en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono"},
-zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",wifi_settings:"Wi-Fi 设置",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道"}
+en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
+zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",wifi_settings:"Wi-Fi 设置",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
 };
 
 let curLang='en';
@@ -141,6 +160,7 @@ document.title=t.title;
 localStorage.setItem('lang',code);
 updateMuteBtn();
 updateFreqDisplay();
+renderPresets();
 }
 
 function toggleLang(){
@@ -206,6 +226,11 @@ if(seeking)return;
 api('/api/seek',{direction:dir,band:document.getElementById('bandsel').value});
 }
 
+function fmtBw(bw){
+if(!bw)return'';
+return'BW: '+bw+' kHz';
+}
+
 function updateFreqDisplay(){
 const el=document.getElementById('freq');
 let html=curFreq>0?fmtFreq(curFreq,curBand):'<span style="color:#555">'+(LANG[curLang]||LANG.en).no_signal+'</span>';
@@ -216,6 +241,7 @@ html+='<span class="badge '+(stereo?'stereo':'mono')+'">'+(stereo?t.stereo:t.mon
 }
 el.innerHTML=html;
 el.className='freq'+(seeking?' seeking':'')+(tuned&&!seeking?' tuned':'');
+document.getElementById('bwlabel').textContent=curBw>0?fmtBw(curBw):'';
 }
 
 function updateStatus(d){
@@ -227,6 +253,7 @@ document.getElementById('seekdn').disabled=seeking;
 updateFreqDisplay();
 }
 function updateQuality(d){
+curBw=d.bw||0;
 let lp=Math.min(100,Math.max(0,d.level));
 document.getElementById('lbar').style.width=lp+'%';
 document.getElementById('lbar').style.background=levelColor(lp);
@@ -234,6 +261,7 @@ document.getElementById('lv').textContent=d.level.toFixed(1)+' dBf';
 let sp=Math.min(100,Math.max(0,d.snr*2));
 document.getElementById('sbar').style.width=sp+'%';
 document.getElementById('sv').textContent=d.snr+' dB';
+document.getElementById('bwlabel').textContent=curBw>0?fmtBw(curBw):'';
 }
 function updateRDS(d){
 const ps=document.getElementById('rdsps');
@@ -244,6 +272,74 @@ document.getElementById('rdspi').textContent='PI:'+d.pi;
 document.getElementById('rdspty').textContent='PTY:'+d.pty;
 document.getElementById('rdstp').textContent=d.tp?'TP':'';
 document.getElementById('rdsta').textContent=d.ta?'TA':'';
+}
+
+// --- Preset management ---
+const PRESET_KEY='tef_presets';
+
+function loadPresets(){
+try{return JSON.parse(localStorage.getItem(PRESET_KEY))||[]}catch(e){return[]}
+}
+function storePresets(arr){
+localStorage.setItem(PRESET_KEY,JSON.stringify(arr));
+}
+
+function savePreset(){
+if(!curFreq||!curBand)return;
+let presets=loadPresets();
+let exists=presets.some(p=>p.band===curBand&&p.freq===curFreq);
+if(exists)return;
+presets.push({band:curBand,freq:curFreq,ts:Date.now()});
+storePresets(presets);
+renderPresets();
+}
+
+function deletePreset(idx){
+let presets=loadPresets();
+if(idx<0||idx>=presets.length)return;
+presets.splice(idx,1);
+storePresets(presets);
+renderPresets();
+}
+
+function recallPreset(idx){
+let presets=loadPresets();
+let p=presets[idx];
+if(p)tune(p.freq,p.band);
+}
+
+function renderPresets(){
+const t=LANG[curLang]||LANG.en;
+let presets=loadPresets();
+let el=document.getElementById('presetlist');
+el.innerHTML='';
+if(!presets.length){
+let empty=document.createElement('div');
+empty.className='preset-empty';
+empty.textContent=t.empty_presets;
+el.appendChild(empty);
+return;
+}
+presets.forEach((p,i)=>{
+let div=document.createElement('div');
+div.className='preset-item';
+div.onclick=()=>recallPreset(i);
+let bandSpan=document.createElement('span');
+bandSpan.className='preset-band';
+bandSpan.textContent=p.band;
+div.appendChild(bandSpan);
+let freqSpan=document.createElement('span');
+freqSpan.className='preset-freq';
+freqSpan.textContent=fmtFreq(p.freq,p.band)+' '+freqUnit(p.band);
+div.appendChild(freqSpan);
+let delBtn=document.createElement('button');
+delBtn.className='btn del';
+delBtn.innerHTML='&times;';
+delBtn.title='Delete';
+delBtn.onclick=(e)=>{e.stopPropagation();deletePreset(i)};
+div.appendChild(delBtn);
+el.appendChild(div);
+});
 }
 
 function connectSSE(){
