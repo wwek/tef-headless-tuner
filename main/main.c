@@ -14,6 +14,20 @@
 
 static const char *TAG = "main";
 
+static const char *wifi_mode_name(wifi_mgr_mode_t mode)
+{
+    switch (mode) {
+    case WIFI_MGR_MODE_AP:
+        return "AP";
+    case WIFI_MGR_MODE_STA:
+        return "STA";
+    case WIFI_MGR_MODE_APSTA:
+        return "APSTA";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static tusb_desc_device_t const s_device_desc = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
@@ -122,6 +136,16 @@ void app_main(void)
     err = wifi_manager_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi init failed: %s", esp_err_to_name(err));
+    } else {
+        char ap_ssid[32] = {0};
+
+        wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+        ESP_LOGI(TAG,
+                 "Startup config: AP SSID=%s, Wi-Fi mode=%s, I2C SDA=%d, SCL=%d",
+                 ap_ssid[0] ? ap_ssid : "<unset>",
+                 wifi_mode_name(wifi_manager_get_mode()),
+                 CONFIG_TEF_I2C_SDA_PIN,
+                 CONFIG_TEF_I2C_SCL_PIN);
     }
 
     // Start web server and XDR-GTK TCP server

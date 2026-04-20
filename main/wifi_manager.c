@@ -33,6 +33,20 @@ static int s_sta_retry_count;
 static wifi_mgr_event_cb_t s_event_cb;
 static void *s_event_cb_ctx;
 
+static const char *wifi_mode_name_local(wifi_mgr_mode_t mode)
+{
+    switch (mode) {
+    case WIFI_MGR_MODE_AP:
+        return "AP";
+    case WIFI_MGR_MODE_STA:
+        return "STA";
+    case WIFI_MGR_MODE_APSTA:
+        return "APSTA";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 #ifndef CONFIG_WIFI_AP_SSID_PREFIX
 #define CONFIG_WIFI_AP_SSID_PREFIX "TEF6686"
 #endif
@@ -319,6 +333,15 @@ esp_err_t wifi_manager_init(void)
     } else {
         ESP_LOGI(TAG, "no STA credentials, starting AP-only");
         err = start_ap();
+    }
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "Wi-Fi ready: mode=%s, ap_ssid=%s, connected=%s, ip=%s",
+                 wifi_mode_name_local(s_mode),
+                 s_ap_ssid[0] ? s_ap_ssid : "<unset>",
+                 s_connected ? "yes" : "no",
+                 s_ip_str[0] ? s_ip_str : "<none>");
     }
 
     return err;

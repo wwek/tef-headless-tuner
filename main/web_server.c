@@ -175,16 +175,28 @@ static esp_err_t h_index(httpd_req_t *req)
     err = httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (err != ESP_OK) return err;
     size_t len = html_index_end - html_index_start;
+    ESP_LOGI(TAG, "HTTP GET %s -> index (%u bytes)", req->uri, (unsigned)len);
     return httpd_resp_send(req, html_index_start, len);
 }
 
 static esp_err_t h_wifi_page(httpd_req_t *req)
 {
+    char ap_ssid[32] = {0};
+    const char *ip = wifi_manager_get_ip();
+
     esp_err_t err = set_cors_headers(req);
     if (err != ESP_OK) return err;
     err = httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (err != ESP_OK) return err;
     size_t len = html_wifi_end - html_wifi_start;
+    wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    ESP_LOGI(TAG,
+             "HTTP GET %s -> wifi page (%u bytes), mode=%d, ap_ssid=%s, ip=%s",
+             req->uri,
+             (unsigned)len,
+             (int)wifi_manager_get_mode(),
+             ap_ssid[0] ? ap_ssid : "<unset>",
+             ip ? ip : "<none>");
     return httpd_resp_send(req, html_wifi_start, len);
 }
 
@@ -430,6 +442,7 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    ESP_LOGI(TAG, "HTTP POST %s -> save STA config for SSID=%s", req->uri, jssid->valuestring);
     esp_err_t err = wifi_manager_set_sta_config(jssid->valuestring, jpass->valuestring);
     cJSON_Delete(body);
 
@@ -439,6 +452,7 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    ESP_LOGI(TAG, "STA config saved successfully, device restart/reconnect required to apply");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
