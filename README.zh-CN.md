@@ -1,5 +1,11 @@
 # TEF6686 Headless Tuner
 
+[![CI](https://github.com/wwek/tef-headless-tuner/actions/workflows/ci.yml/badge.svg)](https://github.com/wwek/tef-headless-tuner/actions/workflows/ci.yml)
+[![Release](https://github.com/wwek/tef-headless-tuner/actions/workflows/release.yml/badge.svg)](https://github.com/wwek/tef-headless-tuner/actions/workflows/release.yml)
+![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.3.1-ff6a00)
+![Target](https://img.shields.io/badge/Target-ESP32--S3-00979d)
+[![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 [English](README.md)
 
 这是一个面向 `ESP32-S3` 的 `TEF6686` headless 调谐器固件项目，支持多种控制方式：
