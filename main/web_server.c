@@ -20,6 +20,20 @@ extern const char html_wifi_end[]    asm("_binary_wifi_html_end");
 
 static httpd_handle_t s_server;
 
+static const char *wifi_mode_name(wifi_mgr_mode_t mode)
+{
+    switch (mode) {
+    case WIFI_MGR_MODE_AP:
+        return "AP";
+    case WIFI_MGR_MODE_STA:
+        return "STA";
+    case WIFI_MGR_MODE_APSTA:
+        return "APSTA";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 // --- SSE ---
 
 #define MAX_SSE_CLIENTS 4
@@ -167,6 +181,19 @@ static cJSON *parse_body(httpd_req_t *req)
     return cJSON_Parse(buf);
 }
 
+static void add_wifi_state(cJSON *root)
+{
+    char ap_ssid[32] = {0};
+    const char *ip = wifi_manager_get_ip();
+    wifi_mgr_mode_t mode = wifi_manager_get_mode();
+
+    wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    cJSON_AddStringToObject(root, "mode", wifi_mode_name(mode));
+    cJSON_AddBoolToObject(root, "connected", wifi_manager_is_connected());
+    cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
+    cJSON_AddStringToObject(root, "ip", ip ? ip : "");
+}
+
 // --- URI handlers ---
 
 static esp_err_t h_index(httpd_req_t *req)
@@ -211,6 +238,15 @@ static esp_err_t h_get_version(httpd_req_t *req)
     cJSON_AddStringToObject(root, "branch", FIRMWARE_BRANCH);
     cJSON_AddStringToObject(root, "date", FIRMWARE_BUILD_DATE);
     err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t h_get_wifi(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    add_wifi_state(root);
+    esp_err_t err = send_json_response(req, root);
     cJSON_Delete(root);
     return err;
 }
@@ -461,15 +497,47 @@ static esp_err_t h_post_wifi(httpd_req_t *req)
     esp_err_t err = wifi_manager_set_sta_config(jssid->valuestring, jpass->valuestring);
     cJSON_Delete(body);
 
-    if (err != ESP_OK) {
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
         ESP_LOGE(TAG, "wifi config failed: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "wifi config failed");
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "STA config saved successfully, device restart/reconnect required to apply");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "saved", true);
+    cJSON_AddBoolToObject(root, "applied", err == ESP_OK);
+    add_wifi_state(root);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "STA config saved and applied successfully");
+    } else {
+        ESP_LOGW(TAG, "STA config saved, but connect attempt timed out; AP-only fallback active");
+    }
+
+    esp_err_t send_err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return send_err;
+}
+
+static esp_err_t h_post_wifi_clear(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "HTTP POST %s -> clear saved STA config", req->uri);
+
+    esp_err_t err = wifi_manager_clear_sta_config();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "clear wifi config failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "clear wifi config failed");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "cleared", true);
+    add_wifi_state(root);
+    esp_err_t send_err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return send_err;
 }
 
 // SSE handler: long-lived connection
@@ -533,6 +601,7 @@ typedef struct {
 static const uri_entry_t s_uris[] = {
     { "/",              HTTP_GET,  h_index        },
     { "/wifi",          HTTP_GET,  h_wifi_page     },
+    { "/api/wifi",      HTTP_GET,  h_get_wifi      },
     { "/api/status",    HTTP_GET,  h_get_status    },
     { "/api/tune",      HTTP_POST, h_post_tune     },
     { "/api/seek",      HTTP_POST, h_post_seek     },
@@ -543,6 +612,7 @@ static const uri_entry_t s_uris[] = {
     { "/api/rds",       HTTP_GET,  h_get_rds       },
     { "/api/events",    HTTP_GET,  h_sse_events    },
     { "/api/wifi",      HTTP_POST, h_post_wifi     },
+    { "/api/wifi/clear", HTTP_POST, h_post_wifi_clear },
     { "/api/version",   HTTP_GET,  h_get_version   },
 };
 

@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "wifi_mgr";
@@ -21,6 +22,9 @@ static const char *TAG = "wifi_mgr";
 #define MAX_SSID_LEN       32
 #define MAX_PASS_LEN       64
 #define AP_MAX_CONN        4
+#define STA_MAX_RETRY      2
+#define TRANSITION_DELAY_MS 750
+#define TRANSITION_TASK_STACK 4096
 
 static EventGroupHandle_t s_wifi_event_group;
 static esp_netif_t *s_sta_netif;
@@ -29,9 +33,19 @@ static bool s_connected;
 static char s_ip_str[16];
 static char s_ap_ssid[32];
 static int s_sta_retry_count;
+static bool s_has_active_sta_config;
+static char s_active_ssid[MAX_SSID_LEN + 1];
+static char s_active_pass[MAX_PASS_LEN + 1];
+static TaskHandle_t s_transition_task;
 
 static wifi_mgr_event_cb_t s_event_cb;
 static void *s_event_cb_ctx;
+
+typedef enum {
+    WIFI_TRANSITION_STA_ONLY,
+    WIFI_TRANSITION_AP_ONLY,
+    WIFI_TRANSITION_RESTORE_ACTIVE,
+} wifi_transition_action_t;
 
 static const char *wifi_mode_name_local(wifi_mgr_mode_t mode)
 {
@@ -94,14 +108,21 @@ static void build_ap_ssid(void)
              CONFIG_WIFI_AP_SSID_PREFIX, mac[4], mac[5]);
 }
 
-static esp_err_t start_ap(void)
+static esp_err_t stop_wifi_if_running(void)
 {
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_ERR_WIFI_NOT_INIT || err == ESP_ERR_WIFI_NOT_STARTED) {
+        return ESP_OK;
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set AP mode failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "stop Wi-Fi failed: %s", esp_err_to_name(err));
         return err;
     }
+    return ESP_OK;
+}
 
+static esp_err_t configure_ap_interface(void)
+{
     wifi_config_t ap_cfg = {
         .ap = {
             .channel = CONFIG_WIFI_AP_CHANNEL,
@@ -112,9 +133,63 @@ static esp_err_t start_ap(void)
     strncpy((char *)ap_cfg.ap.ssid, s_ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
     ap_cfg.ap.ssid_len = (uint8_t)strlen(s_ap_ssid);
 
-    err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "set AP config failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t configure_sta_interface(const char *ssid, const char *password)
+{
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set STA config failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static void prepare_sta_connection_wait(void)
+{
+    xEventGroupClearBits(s_wifi_event_group, STA_CONNECTED_BIT | STA_FAIL_BIT);
+    s_sta_retry_count = 0;
+    s_connected = false;
+    s_ip_str[0] = '\0';
+}
+
+static esp_err_t wait_for_sta_connection(void)
+{
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           STA_CONNECTED_BIT | STA_FAIL_BIT,
+                                           pdTRUE, pdFALSE,
+                                           pdMS_TO_TICKS(CONFIG_WIFI_STA_CONNECT_TIMEOUT_MS));
+
+    if (bits & STA_CONNECTED_BIT) {
+        return ESP_OK;
+    }
+
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t start_ap(void)
+{
+    esp_err_t err = stop_wifi_if_running();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set AP mode failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = configure_ap_interface();
+    if (err != ESP_OK) {
         return err;
     }
 
@@ -131,41 +206,29 @@ static esp_err_t start_ap(void)
 
 static esp_err_t start_apsta_with_sta(const char *ssid, const char *password)
 {
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_err_t err = stop_wifi_if_running();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "set APSTA mode failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    // Configure AP side
-    wifi_config_t ap_cfg = {
-        .ap = {
-            .channel = CONFIG_WIFI_AP_CHANNEL,
-            .max_connection = AP_MAX_CONN,
-            .authmode = WIFI_AUTH_OPEN,
-        },
-    };
-    strncpy((char *)ap_cfg.ap.ssid, s_ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
-    ap_cfg.ap.ssid_len = (uint8_t)strlen(s_ap_ssid);
-
-    err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    err = configure_ap_interface();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set AP config in APSTA failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    // Configure STA side
-    wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
-
-    err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    err = configure_sta_interface(ssid, password);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set STA config failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    s_sta_retry_count = 0;
+    prepare_sta_connection_wait();
+    set_mode(WIFI_MGR_MODE_APSTA, false);
     err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "APSTA start failed: %s", esp_err_to_name(err));
@@ -173,34 +236,37 @@ static esp_err_t start_apsta_with_sta(const char *ssid, const char *password)
     }
 
     ESP_LOGI(TAG, "APSTA started, connecting STA to %s", ssid);
-
-    // Wait for STA connection or failure
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                            STA_CONNECTED_BIT | STA_FAIL_BIT,
-                                            pdFALSE, pdFALSE,
-                                            pdMS_TO_TICKS(CONFIG_WIFI_STA_CONNECT_TIMEOUT_MS));
-
-    if (bits & STA_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "STA connected, stopping AP");
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "switch to STA-only failed: %s", esp_err_to_name(err));
-            // Remain in APSTA as degraded state
-            set_mode(WIFI_MGR_MODE_APSTA, true);
-            return ESP_OK;
-        }
-        set_mode(WIFI_MGR_MODE_STA, true);
+    err = wait_for_sta_connection();
+    if (err == ESP_OK) {
+        set_mode(WIFI_MGR_MODE_APSTA, true);
+        ESP_LOGI(TAG, "STA connected, AP retained for management access");
         return ESP_OK;
     }
 
-    // STA failed or timed out - fall back to AP only
     ESP_LOGW(TAG, "STA connect failed, falling back to AP-only");
-    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_err_t fallback_err = start_ap();
+    if (fallback_err != ESP_OK) {
+        return fallback_err;
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t start_sta_with_saved_credentials(const char *ssid, const char *password)
+{
+    esp_err_t err = start_apsta_with_sta(ssid, password);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "fallback to AP failed: %s", esp_err_to_name(err));
         return err;
     }
-    set_mode(WIFI_MGR_MODE_AP, false);
+
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "switch to STA-only failed: %s", esp_err_to_name(err));
+        set_mode(WIFI_MGR_MODE_APSTA, true);
+        return ESP_OK;
+    }
+
+    set_mode(WIFI_MGR_MODE_STA, true);
+    ESP_LOGI(TAG, "STA connected, AP disabled after boot credential load");
     return ESP_OK;
 }
 
@@ -208,7 +274,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT) {
-        if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (event_id == WIFI_EVENT_STA_START) {
+            s_sta_retry_count = 0;
+            ESP_LOGI(TAG, "STA started, initiating connection");
+            esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "STA initial connect failed: %s", esp_err_to_name(err));
+                xEventGroupSetBits(s_wifi_event_group, STA_FAIL_BIT);
+            }
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             if (s_sta_retry_count < 1) {
                 s_sta_retry_count++;
                 ESP_LOGI(TAG, "STA disconnected, retrying (%d/1)", s_sta_retry_count);
@@ -329,7 +403,7 @@ esp_err_t wifi_manager_init(void)
 
     if (read_sta_credentials(ssid, sizeof(ssid), password, sizeof(password)) == ESP_OK) {
         ESP_LOGI(TAG, "found STA credentials for %s", ssid);
-        err = start_apsta_with_sta(ssid, password);
+        err = start_sta_with_saved_credentials(ssid, password);
     } else {
         ESP_LOGI(TAG, "no STA credentials, starting AP-only");
         err = start_ap();
@@ -396,7 +470,7 @@ esp_err_t wifi_manager_set_sta_config(const char *ssid, const char *password)
     }
 
     ESP_LOGI(TAG, "STA config saved: %s", ssid);
-    return ESP_OK;
+    return start_apsta_with_sta(ssid, password ? password : "");
 }
 
 esp_err_t wifi_manager_clear_sta_config(void)
