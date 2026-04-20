@@ -16,6 +16,9 @@ input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;b
 .btn:hover{background:#1a5276}
 .btn:active{background:#0b2545}
 .btn:disabled{opacity:.4;cursor:default}
+.btn.secondary{background:#5a2832}
+.btn.secondary:hover{background:#753745}
+.btn.secondary:active{background:#421c24}
 #msg{text-align:center;margin-top:10px;font-size:.95em;min-height:1.4em}
 .info{text-align:center;color:#aaa;font-size:.85em;margin:6px 0}
 .back{text-align:center;margin-top:16px}
@@ -29,6 +32,7 @@ input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;b
 <div class="card">
 <div class="info" id="curmode">Mode: --</div>
 <div class="info" id="curip">IP: --</div>
+<div class="info" id="curap">Device AP: --</div>
 </div>
 
 <div class="card">
@@ -37,6 +41,7 @@ input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;b
 <label for="pass" data-i18n="password">Password</label>
 <input type="password" id="pass">
 <button class="btn" id="connectbtn" onclick="doConnect()" data-i18n="connect">Connect</button>
+<button class="btn secondary" id="clearbtn" onclick="doClear()" data-i18n="clear">Clear Saved Wi-Fi</button>
 <div id="msg"></div>
 </div>
 
@@ -44,11 +49,12 @@ input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;b
 
 <script>
 const LANG={
-en:{title:"TEF6686 Wi-Fi Setup",ssid:"SSID",password:"Password",connect:"Connect",back:"Back to Tuner",lang_label:"中文",enter_ssid:"Enter SSID",connecting:"Connecting...",saved:"Config saved. Reconnecting...",check:"Check if device is reachable at the new address.",failed:"Failed: "},
-zh:{title:"TEF6686 Wi-Fi 设置",ssid:"网络名称",password:"密码",connect:"连接",back:"返回调谐器",lang_label:"EN",enter_ssid:"请输入网络名称",connecting:"正在连接...",saved:"配置已保存，正在重连...",check:"请检查设备在新地址是否可达。",failed:"连接失败："}
+en:{title:"TEF6686 Wi-Fi Setup",ssid:"SSID",password:"Password",connect:"Connect",clear:"Clear Saved Wi-Fi",back:"Back to Tuner",lang_label:"中文",enter_ssid:"Enter SSID",connecting:"Saving and connecting...",connected:"Connected to upstream Wi-Fi. Device AP remains available.",saved_only:"Saved, but upstream connection did not succeed. Staying on device AP.",clearing:"Clearing saved Wi-Fi...",cleared:"Saved Wi-Fi credentials cleared.",failed:"Operation failed: ",mode_label:"Mode",ip_label:"IP",ap_label:"Device AP"},
+zh:{title:"TEF6686 Wi-Fi 设置",ssid:"网络名称",password:"密码",connect:"连接",clear:"清除已保存 Wi-Fi",back:"返回调谐器",lang_label:"EN",enter_ssid:"请输入网络名称",connecting:"正在保存并尝试连接...",connected:"已连上外部 Wi-Fi，设备 AP 仍保留可继续管理。",saved_only:"配置已保存，但本次未连上外部 Wi-Fi，当前仍停留在设备 AP。",clearing:"正在清除已保存 Wi-Fi...",cleared:"已清除保存的 Wi-Fi 凭据。",failed:"操作失败：",mode_label:"模式",ip_label:"IP",ap_label:"设备 AP"}
 };
 
 let curLang='en';
+let currentWifiState=null;
 
 function applyLang(code){
 curLang=code;
@@ -61,17 +67,33 @@ document.getElementById('langbtn').textContent=t.lang_label;
 document.documentElement.lang=code==='zh'?'zh-CN':'en';
 document.title=t.title;
 localStorage.setItem('lang',code);
+if(currentWifiState)renderWifiState(currentWifiState);
 }
 
 function toggleLang(){applyLang(curLang==='en'?'zh':'en')}
 
 function setMsg(t,c){let m=document.getElementById('msg');m.textContent=t;m.style.color=c||'#eee'}
 
-function setMode(){
-fetch('/api/status').then(r=>r.json()).then(d=>{
-document.getElementById('curmode').textContent='Mode: AP+STA';
-document.getElementById('curip').textContent='IP: '+location.hostname;
-}).catch(()=>{});
+function setBusy(busy){
+document.getElementById('connectbtn').disabled=busy;
+document.getElementById('clearbtn').disabled=busy;
+}
+
+function renderWifiState(data){
+const t=LANG[curLang]||LANG.en;
+currentWifiState=data;
+document.getElementById('curmode').textContent=t.mode_label+': '+(data.mode||'--');
+document.getElementById('curip').textContent=t.ip_label+': '+(data.ip||location.hostname||'--');
+document.getElementById('curap').textContent=t.ap_label+': '+(data.ap_ssid||'--');
+}
+
+async function loadWifiState(){
+try{
+let r=await fetch('/api/wifi');
+if(!r.ok)throw new Error(r.statusText);
+let data=await r.json();
+renderWifiState(data);
+}catch(_e){}
 }
 
 async function doConnect(){
@@ -80,22 +102,43 @@ let ssid=document.getElementById('ssid').value.trim();
 let pass=document.getElementById('pass').value;
 if(!ssid){setMsg(t.enter_ssid,'#e94560');return}
 setMsg(t.connecting,'#4ea8de');
-document.getElementById('connectbtn').disabled=true;
+setBusy(true);
 try{
 let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password:pass})});
-if(!r.ok)throw new Error(r.statusText);
-setMsg(t.saved,'#2ecc71');
-setTimeout(()=>setMsg(t.check,'#2ecc71'),5000);
+let data=await r.json().catch(()=>null);
+if(!r.ok||!data)throw new Error(r.statusText);
+renderWifiState(data);
+setMsg(data.applied?t.connected:t.saved_only,data.applied?'#2ecc71':'#f39c12');
 }catch(e){
 setMsg(t.failed+e.message,'#e94560');
-document.getElementById('connectbtn').disabled=false;
+}finally{
+setBusy(false);
+}
+}
+
+async function doClear(){
+const t=LANG[curLang]||LANG.en;
+setMsg(t.clearing,'#4ea8de');
+setBusy(true);
+try{
+let r=await fetch('/api/wifi/clear',{method:'POST'});
+let data=await r.json().catch(()=>null);
+if(!r.ok||!data)throw new Error(r.statusText);
+renderWifiState(data);
+document.getElementById('ssid').value='';
+document.getElementById('pass').value='';
+setMsg(t.cleared,'#2ecc71');
+}catch(e){
+setMsg(t.failed+e.message,'#e94560');
+}finally{
+setBusy(false);
 }
 }
 
 const saved=localStorage.getItem('lang');
 const auto=navigator.language.startsWith('zh')?'zh':'en';
 applyLang(saved||auto);
-setMode();
+loadWifiState();
 </script>
 </body>
 </html>
