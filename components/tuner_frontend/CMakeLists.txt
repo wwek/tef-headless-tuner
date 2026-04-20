@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "audio.c"
+        "rds_decode.c"
+        "tuner_controller.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        tef6686
+        esp_driver_i2s
+        esp_ringbuf
+        esp_tinyusb
+        freertos
+)

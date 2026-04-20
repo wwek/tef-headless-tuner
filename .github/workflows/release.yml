@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build And Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: .
+          command: idf.py build
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cp build/tef-headless-tuner.bin release/
+          cp build/bootloader/bootloader.bin release/
+          cp build/partition_table/partition-table.bin release/
+          cp build/flash_args release/ || true
+          cp build/flasher_args.json release/ || true
+          sha256sum release/* > release/SHA256SUMS.txt
+          zip -j "tef-headless-tuner-${GITHUB_REF_NAME}-esp32s3.zip" release/*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            tef-headless-tuner-${{ github.ref_name }}-esp32s3.zip
+            release/tef-headless-tuner.bin
+            release/bootloader.bin
+            release/partition-table.bin
+            release/flash_args
+            release/flasher_args.json
+            release/SHA256SUMS.txt

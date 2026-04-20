@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEF6686 Wi-Fi Setup</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;max-width:480px;margin:0 auto;padding:12px}
+a{color:#4ea8de}
+h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
+.card{background:#16213e;border-radius:10px;padding:14px;margin:10px 0}
+label{display:block;font-size:.85em;color:#aaa;margin:8px 0 4px}
+input[type=text],input[type=password]{width:100%;background:#0f3460;color:#eee;border:1px solid #333;border-radius:6px;padding:8px;font-size:1em}
+.btn{background:#0f3460;color:#eee;border:none;border-radius:6px;padding:10px 20px;font-size:1em;cursor:pointer;width:100%;margin-top:12px;transition:background .15s}
+.btn:hover{background:#1a5276}
+.btn:active{background:#0b2545}
+.btn:disabled{opacity:.4;cursor:default}
+#msg{text-align:center;margin-top:10px;font-size:.95em;min-height:1.4em}
+.info{text-align:center;color:#aaa;font-size:.85em;margin:6px 0}
+.back{text-align:center;margin-top:16px}
+</style>
+</head>
+<body>
+<h1>TEF6686 Wi-Fi Setup</h1>
+
+<div class="card">
+<div class="info" id="curmode">Mode: --</div>
+<div class="info" id="curip">IP: --</div>
+</div>
+
+<div class="card">
+<label for="ssid">SSID</label>
+<input type="text" id="ssid" autocomplete="off">
+<label for="pass">Password</label>
+<input type="password" id="pass">
+<button class="btn" id="connectbtn" onclick="doConnect()">Connect</button>
+<div id="msg"></div>
+</div>
+
+<div class="back"><a href="/">Back to Tuner</a></div>
+
+<script>
+function setMsg(t,c){let m=document.getElementById('msg');m.textContent=t;m.style.color=c||'#eee'}
+function setMode(){
+  fetch('/api/status').then(r=>r.json()).then(d=>{
+    document.getElementById('curmode').textContent='Mode: AP+STA';
+    document.getElementById('curip').textContent='IP: '+location.hostname;
+  }).catch(()=>{});
+}
+async function doConnect(){
+  let ssid=document.getElementById('ssid').value.trim();
+  let pass=document.getElementById('pass').value;
+  if(!ssid){setMsg('Enter SSID','#e94560');return}
+  setMsg('Connecting...','#4ea8de');
+  document.getElementById('connectbtn').disabled=true;
+  try{
+    let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password:pass})});
+    if(!r.ok)throw new Error(r.statusText);
+    setMsg('Config saved. Reconnecting...','#2ecc71');
+    setTimeout(()=>{
+      setMsg('Check if device is reachable at the new address.','#2ecc71');
+    },5000);
+  }catch(e){
+    setMsg('Failed: '+e.message,'#e94560');
+    document.getElementById('connectbtn').disabled=false;
+  }
+}
+setMode();
+</script>
+</body>
+</html>

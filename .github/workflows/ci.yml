@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-esp32s3:
+    name: Build ESP32-S3 Firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: .
+          command: idf.py build
+
+      - name: Collect firmware artifacts
+        run: |
+          mkdir -p dist
+          cp build/tef-headless-tuner.bin dist/
+          cp build/bootloader/bootloader.bin dist/
+          cp build/partition_table/partition-table.bin dist/
+          cp build/flash_args dist/ || true
+          cp build/flasher_args.json dist/ || true
+          sha256sum dist/* > dist/SHA256SUMS.txt
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tef-headless-tuner-esp32s3-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

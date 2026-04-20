@@ -1,0 +1,48 @@
+menu "USB CDC Configuration"
+
+config USB_CDC_RX_BUF_SIZE
+    int "CDC RX buffer size"
+    default 256
+    help
+        Size of the CDC receive buffer.
+
+config USB_CDC_CMD_TASK_STACK
+    int "Command task stack size"
+    default 4096
+    help
+        Stack size for the command processing task.
+
+config USB_CDC_CMD_TASK_PRIO
+    int "Command task priority"
+    default 5
+    help
+        Priority for the command processing task.
+
+endmenu
+
+menu "WiFi Manager Configuration"
+
+config WIFI_AP_SSID_PREFIX
+    string "AP SSID prefix"
+    default "TEF6686"
+    help
+        Prefix for the generated AP SSID. Last 2 bytes of MAC are appended.
+
+config WIFI_AP_PASSWORD
+    string "AP password (empty = open)"
+    default ""
+    help
+        Password for AP mode. Leave empty for open network.
+
+config WIFI_AP_CHANNEL
+    int "AP channel"
+    default 1
+    range 1 13
+
+config WIFI_STA_CONNECT_TIMEOUT_MS
+    int "STA connect timeout (ms)"
+    default 5000
+    help
+        Time in milliseconds to wait for STA connection before falling back to AP-only.
+
+endmenu

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEF6686 Tuner</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;max-width:480px;margin:0 auto;padding:12px}
+a{color:#4ea8de}
+h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
+.card{background:#16213e;border-radius:10px;padding:14px;margin:10px 0}
+.row{display:flex;align-items:center;gap:8px;margin:6px 0}
+.row.center{justify-content:center}
+.freq{font-size:2.8em;font-family:'Courier New',monospace;text-align:center;letter-spacing:2px}
+.unit{font-size:.4em;color:#aaa;vertical-align:super}
+.band-label{font-size:.9em;color:#aaa;text-align:center;margin-top:-4px}
+.btn{background:#0f3460;color:#eee;border:none;border-radius:6px;padding:8px 14px;font-size:.95em;cursor:pointer;min-width:44px;transition:background .15s}
+.btn:hover{background:#1a5276}
+.btn:active{background:#0b2545}
+.btn.accent{background:#e94560}
+.btn.accent:hover{background:#d63851}
+.btn:disabled{opacity:.4;cursor:default}
+input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;border-radius:6px;padding:6px 8px;font-size:.95em;width:100%}
+.meter{height:14px;background:#0a0a1a;border-radius:7px;overflow:hidden;flex:1}
+.meter-fill{height:100%;border-radius:7px;transition:width .3s}
+.meter-label{min-width:60px;text-align:right;font-size:.85em}
+.rds-ps{font-size:1.5em;text-align:center;font-family:'Courier New',monospace;letter-spacing:2px;min-height:1.6em}
+.rds-rt{text-align:center;font-size:.9em;color:#ccc;min-height:1.2em;margin-top:4px}
+.rds-info{display:flex;justify-content:center;gap:12px;font-size:.8em;color:#aaa;margin-top:4px;flex-wrap:wrap}
+.rds-info span{background:#0f3460;padding:2px 6px;border-radius:4px}
+.slider-row{display:flex;align-items:center;gap:8px}
+.slider-row input[type=range]{flex:1;accent-color:#e94560}
+.slider-row .val{min-width:28px;text-align:center}
+.status-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.status-dot.on{background:#2ecc71}
+.status-dot.off{background:#e74c3c}
+.header-row{display:flex;align-items:center;justify-content:space-between}
+.wifi-link{font-size:.85em}
+</style>
+</head>
+<body>
+<h1><div class="header-row"><span>TEF6686 Tuner</span><span class="status-dot off" id="conn"></span></div></h1>
+
+<div class="card">
+<div class="freq" id="freq">--.-<span class="unit">MHz</span></div>
+<div class="band-label" id="band">FM</div>
+</div>
+
+<div class="card">
+<div class="row center">
+<select id="bandsel"><option>FM</option><option>LW</option><option>MW</option><option>SW</option></select>
+</div>
+<div class="row center">
+<button class="btn" onclick="stepFreq(-1)">- Step</button>
+<input type="number" id="freqin" placeholder="Freq kHz">
+<button class="btn" onclick="tuneInput()">Tune</button>
+<button class="btn" onclick="stepFreq(1)">+ Step</button>
+</div>
+<div class="row center">
+<button class="btn" id="seekdn" onclick="doSeek('DOWN')">Seek DN</button>
+<button class="btn" id="seekup" onclick="doSeek('UP')">Seek UP</button>
+<button class="btn accent" onclick="seekStop()">Stop</button>
+</div>
+</div>
+
+<div class="card">
+<div class="row">
+<span class="meter-label" id="lv">--.- dBf</span>
+<div class="meter"><div class="meter-fill" id="lbar" style="width:0%;background:#2ecc71"></div></div>
+</div>
+<div class="row">
+<span class="meter-label" id="sv">-- dB</span>
+<div class="meter"><div class="meter-fill" id="sbar" style="width:0%;background:#3498db"></div></div>
+</div>
+</div>
+
+<div class="card" id="rdscard">
+<div class="rds-ps" id="rdsps">--------</div>
+<div class="rds-rt" id="rdsrt"></div>
+<div class="rds-info">
+<span id="rdspi">PI:----</span>
+<span id="rdspty">PTY:-</span>
+<span id="rdstp">TP</span>
+<span id="rdsta">TA</span>
+</div>
+</div>
+
+<div class="card">
+<div class="slider-row">
+<span>Vol</span>
+<input type="range" id="vol" min="0" max="30" value="0" oninput="setVolume(this.value)">
+<span class="val" id="volv">0</span>
+</div>
+<div class="row center">
+<button class="btn" id="mutebtn" onclick="toggleMute()">Mute</button>
+</div>
+</div>
+
+<a class="wifi-link" href="/wifi">Wi-Fi Settings</a>
+
+<script>
+let curFreq=0,curBand='FM',seeking=false,muted=false;
+
+function fmtFreq(f,b){
+  if(b==='FM') return (f/1000).toFixed(1);
+  return f;
+}
+function stepSize(b){return b==='FM'?100:b==='SW'?5:9}
+function freqUnit(b){return b==='FM'?'MHz':'kHz'}
+
+async function api(path,body){
+  await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+}
+function tune(f,b){api('/api/tune',{freq:f,band:b})}
+function seekStop(){api('/api/seekstop',{})}
+function setVolume(v){document.getElementById('volv').textContent=v;api('/api/volume',{volume:+v})}
+function toggleMute(){muted=!muted;api('/api/mute',{mute:muted});document.getElementById('mutebtn').textContent=muted?'Unmute':'Mute'}
+
+function stepFreq(dir){
+  let f=curFreq+dir*stepSize(curBand);
+  tune(f,curBand);
+}
+function tuneInput(){
+  let f=parseInt(document.getElementById('freqin').value);
+  if(f)tune(f,document.getElementById('bandsel').value);
+}
+function doSeek(dir){
+  if(seeking)return;
+  api('/api/seek',{direction:dir,band:document.getElementById('bandsel').value});
+}
+
+function updateStatus(d){
+  curFreq=d.freq;curBand=d.band;seeking=d.seeking;
+  document.getElementById('freq').innerHTML=fmtFreq(d.freq,d.band)+'<span class="unit">'+freqUnit(d.band)+'</span>';
+  document.getElementById('band').textContent=d.band;
+  document.getElementById('bandsel').value=d.band;
+  document.getElementById('seekup').disabled=seeking;
+  document.getElementById('seekdn').disabled=seeking;
+}
+function updateQuality(d){
+  let lp=Math.min(100,Math.max(0,d.level));
+  document.getElementById('lbar').style.width=lp+'%';
+  document.getElementById('lv').textContent=d.level.toFixed(1)+' dBf';
+  let sp=Math.min(100,Math.max(0,d.snr*2));
+  document.getElementById('sbar').style.width=sp+'%';
+  document.getElementById('sv').textContent=d.snr+' dB';
+}
+function updateRDS(d){
+  document.getElementById('rdsps').textContent=d.ps||'--------';
+  document.getElementById('rdsrt').textContent=d.rt||'';
+  document.getElementById('rdspi').textContent='PI:'+d.pi;
+  document.getElementById('rdspty').textContent='PTY:'+d.pty;
+  document.getElementById('rdstp').textContent=d.tp?'TP':'';
+  document.getElementById('rdsta').textContent=d.ta?'TA':'';
+}
+
+function connectSSE(){
+  let es=new EventSource('/api/events');
+  es.addEventListener('status',e=>{updateStatus(JSON.parse(e.data))});
+  es.addEventListener('rds',e=>{updateRDS(JSON.parse(e.data))});
+  es.addEventListener('quality',e=>{updateQuality(JSON.parse(e.data))});
+  es.onopen=()=>{document.getElementById('conn').className='status-dot on'};
+  es.onerror=()=>{document.getElementById('conn').className='status-dot off';es.close();setTimeout(connectSSE,3000)};
+}
+fetch('/api/status').then(r=>r.json()).then(d=>updateStatus(d)).catch(()=>{});
+connectSSE();
+</script>
+</body>
+</html>

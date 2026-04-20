@@ -1,0 +1,56 @@
+#pragma once
+
+#include "usb_audio_desc.h"
+#include <stdint.h>
+
+// USB VID/PID for the USB device
+#define USBD_VID 0x303A  // Espressif
+#define USBD_PID 0x80AF  // Custom PID for TEF headless tuner
+#define USBD_VER 0x0100  // Device version 1.0
+
+// Endpoint assignments
+#define CDC_NOTIF_EP 0x81
+#define CDC_OUT_EP 0x02
+#define CDC_IN_EP 0x82
+#define AUDIO_IN_EP 0x83
+
+// Interface numbering when audio is enabled: CDC control (0), CDC data (1),
+// Audio control (2), Audio streaming (3)
+#define ITF_NUM_CDC 0
+#define ITF_NUM_CDC_DATA 1
+#define ITF_NUM_AUDIO_CTL 2
+#define ITF_NUM_AUDIO_STR 3
+#define ITF_NUM_TOTAL 4
+
+#define TUD_AUDIO_MIC_TWO_CH_DESC_LEN (TUD_AUDIO_DESC_IAD_LEN \
+    + TUD_AUDIO_DESC_STD_AC_LEN \
+    + TUD_AUDIO_DESC_CS_AC_LEN \
+    + TUD_AUDIO_DESC_CLK_SRC_LEN \
+    + TUD_AUDIO_DESC_INPUT_TERM_LEN \
+    + TUD_AUDIO_DESC_OUTPUT_TERM_LEN \
+    + TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL_LEN \
+    + TUD_AUDIO_DESC_STD_AS_INT_LEN \
+    + TUD_AUDIO_DESC_STD_AS_INT_LEN \
+    + TUD_AUDIO_DESC_CS_AS_INT_LEN \
+    + TUD_AUDIO_DESC_TYPE_I_FORMAT_LEN \
+    + TUD_AUDIO_DESC_STD_AS_ISO_EP_LEN \
+    + TUD_AUDIO_DESC_CS_AS_ISO_EP_LEN)
+
+#define TUD_AUDIO_MIC_TWO_CH_DESCRIPTOR(_itfnum, _stridx, _n_bytes_per_sample, _n_bits_used_per_sample, _epin, _epsize) \
+    TUD_AUDIO_DESC_IAD(/*_firstitf*/ _itfnum, /*_nitfs*/ 0x02, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_STD_AC(/*_itfnum*/ _itfnum, /*_nEPs*/ 0x00, /*_stridx*/ _stridx), \
+    TUD_AUDIO_DESC_CS_AC(/*_bcdADC*/ 0x0200, /*_category*/ AUDIO_FUNC_MICROPHONE, /*_totallen*/ TUD_AUDIO_DESC_CLK_SRC_LEN + TUD_AUDIO_DESC_INPUT_TERM_LEN + TUD_AUDIO_DESC_OUTPUT_TERM_LEN + TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL_LEN, /*_ctrl*/ AUDIO_CS_AS_INTERFACE_CTRL_LATENCY_POS), \
+    TUD_AUDIO_DESC_CLK_SRC(/*_clkid*/ UAC2_ENTITY_CLOCK, /*_attr*/ AUDIO_CLOCK_SOURCE_ATT_INT_FIX_CLK, /*_ctrl*/ (AUDIO_CTRL_R << AUDIO_CLOCK_SOURCE_CTRL_CLK_FRQ_POS) | (AUDIO_CTRL_R << AUDIO_CLOCK_SOURCE_CTRL_CLK_VAL_POS), /*_assocTerm*/ UAC2_ENTITY_INPUT_TERMINAL, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_INPUT_TERM(/*_termid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_IN_GENERIC_MIC, /*_assocTerm*/ UAC2_ENTITY_OUTPUT_TERMINAL, /*_clkid*/ UAC2_ENTITY_CLOCK, /*_nchannelslogical*/ 0x02, /*_channelcfg*/ AUDIO_STEREO_CHANNEL_CFG, /*_idxchannelnames*/ 0x00, /*_ctrl*/ AUDIO_CTRL_R << AUDIO_IN_TERM_CTRL_CONNECTOR_POS, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_OUTPUT_TERM(/*_termid*/ UAC2_ENTITY_OUTPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_USB_STREAMING, /*_assocTerm*/ UAC2_ENTITY_INPUT_TERMINAL, /*_srcid*/ UAC2_ENTITY_FEATURE_UNIT, /*_clkid*/ UAC2_ENTITY_CLOCK, /*_ctrl*/ 0x0000, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL(/*_unitid*/ UAC2_ENTITY_FEATURE_UNIT, /*_srcid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_ctrlch0master*/ (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_VOLUME_POS), /*_ctrlch1*/ (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_VOLUME_POS), /*_ctrlch2*/ (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_VOLUME_POS), /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x00, /*_nEPs*/ 0x00, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x01, /*_nEPs*/ 0x01, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_CS_AS_INT(/*_termid*/ UAC2_ENTITY_OUTPUT_TERMINAL, /*_ctrl*/ AUDIO_CTRL_NONE, /*_formattype*/ AUDIO_FORMAT_TYPE_I, /*_formats*/ AUDIO_DATA_FORMAT_TYPE_I_PCM, /*_nchannelsphysical*/ 0x02, /*_channelcfg*/ AUDIO_STEREO_CHANNEL_CFG, /*_stridx*/ 0x00), \
+    TUD_AUDIO_DESC_TYPE_I_FORMAT(_n_bytes_per_sample, _n_bits_used_per_sample), \
+    TUD_AUDIO_DESC_STD_AS_ISO_EP(/*_ep*/ _epin, /*_attr*/ (uint8_t)((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_DATA), /*_maxEPsize*/ _epsize, /*_interval*/ 0x01), \
+    TUD_AUDIO_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, /*_ctrl*/ AUDIO_CTRL_NONE, /*_lockdelayunit*/ AUDIO_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, /*_lockdelay*/ 0x0000)
+
+// Get the active configuration descriptor (CDC only or CDC + UAC2).
+const uint8_t *usb_composite_get_config_desc(uint16_t *len);
+uint16_t usb_composite_get_config_desc_len(void);

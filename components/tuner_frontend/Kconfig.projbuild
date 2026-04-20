@@ -1,0 +1,56 @@
+menu "Audio Configuration"
+
+config AUDIO_I2S_PORT
+    int "I2S port number"
+    default 0
+    help
+        I2S port for audio input from TEF6686.
+
+config AUDIO_BCLK_PIN
+    int "I2S BCLK GPIO"
+    default 4
+    help
+        GPIO for I2S BCLK from TEF6686.
+
+config AUDIO_WS_PIN
+    int "I2S WS (LRCLK) GPIO"
+    default 5
+    help
+        GPIO for I2S word select from TEF6686.
+
+config AUDIO_DATA_PIN
+    int "I2S Data In GPIO"
+    default 6
+    help
+        GPIO for I2S data input from TEF6686.
+
+config AUDIO_SAMPLE_RATE
+    int "Audio sample rate (Hz)"
+    default 44100
+    help
+        USB audio sample rate.
+
+config AUDIO_BITS_PER_SAMPLE
+    int "Bits per sample"
+    default 16
+    help
+        Audio bit depth (16 or 24).
+
+endmenu
+
+menu "Tuner Defaults"
+
+config TUNER_DEFAULT_VOLUME
+    int "Default volume (0-30)"
+    default 20
+    range 0 30
+    help
+        Default volume level on startup.
+
+config TUNER_DEFAULT_BAND_FM
+    bool "Start in FM band"
+    default y
+    help
+        If enabled, the tuner starts in FM band mode.
+
+endmenu

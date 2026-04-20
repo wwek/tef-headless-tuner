@@ -1,0 +1,36 @@
+# Shareable EIM configuration.
+# Keep machine-specific paths out of this file.
+# Users can rely on EIM defaults or override with CLI arguments/environment variables.
+
+target = ["esp32s3"]
+idf_versions = ["v5.3.1"]
+tools_json_file = "tools/tools.json"
+config_file_save_path = "eim_config.toml"
+non_interactive = true
+wizard_all_questions = false
+mirror = "https://github.com"
+idf_mirror = "https://jihulab.com/esp-mirror"
+pypi_mirror = "https://pypi.org/simple"
+recurse_submodules = true
+install_all_prerequisites = true
+skip_prerequisites_check = false
+cleanup = false
+python_env_folder_name = "python"
+python_version_override = "python313"
+create_bat_activation_script = false
+
+[idf_features_per_version]
+"v5.3.1" = ["core"]
+
+[idf_tools_per_version]
+"v5.3.1" = [
+    "xtensa-esp-elf-gdb",
+    "xtensa-esp-elf",
+    "esp-clang",
+    "riscv32-esp-elf",
+    "esp32ulp-elf",
+    "cmake",
+    "openocd-esp32",
+    "ninja",
+    "esp-rom-elfs",
+]
