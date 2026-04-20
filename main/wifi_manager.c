@@ -631,6 +631,9 @@ esp_err_t wifi_manager_init(void)
     }
     s_wifi_inited = true;
 
+    // Disable WiFi power save for real-time audio streaming latency
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     // Create event group for STA signaling
     s_wifi_event_group = xEventGroupCreate();
     if (s_wifi_event_group == NULL) {

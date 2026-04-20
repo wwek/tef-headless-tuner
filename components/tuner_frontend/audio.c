@@ -26,6 +26,40 @@ static uint32_t s_sample_rate_hz;
 static uint8_t s_clock_valid = 1;
 static bool s_mute[AUDIO_CHANNEL_COUNT + 1];
 static int16_t s_volume[AUDIO_CHANNEL_COUNT + 1];
+
+#define MAX_AUDIO_CONSUMERS 4
+
+typedef struct {
+    audio_data_cb_t cb;
+    void *ctx;
+} audio_consumer_t;
+
+static audio_consumer_t s_consumers[MAX_AUDIO_CONSUMERS];
+
+void audio_register_data_cb(audio_data_cb_t cb, void *ctx)
+{
+    if (!cb) return;
+    for (int i = 0; i < MAX_AUDIO_CONSUMERS; i++) {
+        if (!s_consumers[i].cb) {
+            s_consumers[i].cb = cb;
+            s_consumers[i].ctx = ctx;
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "no free audio consumer slot");
+}
+
+void audio_unregister_data_cb(audio_data_cb_t cb)
+{
+    if (!cb) return;
+    for (int i = 0; i < MAX_AUDIO_CONSUMERS; i++) {
+        if (s_consumers[i].cb == cb) {
+            s_consumers[i].cb = NULL;
+            s_consumers[i].ctx = NULL;
+        }
+    }
+}
+
 static struct TU_ATTR_PACKED {
     uint16_t wNumSubRanges;
     struct TU_ATTR_PACKED {
@@ -280,6 +314,12 @@ static void audio_task_fn(void *arg)
         size_t bytes_read = 0;
         esp_err_t err = i2s_channel_read(s_rx_chan, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(100));
         if (err == ESP_OK && bytes_read > 0) {
+            for (int i = 0; i < MAX_AUDIO_CONSUMERS; i++) {
+                if (s_consumers[i].cb) {
+                    s_consumers[i].cb(buf, bytes_read, s_consumers[i].ctx);
+                }
+            }
+
             BaseType_t wr = xRingbufferSend(s_ring_buf, buf, bytes_read, pdMS_TO_TICKS(10));
             if (wr != pdTRUE) {
                 // Buffer overflow - drop oldest data

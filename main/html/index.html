@@ -122,6 +122,7 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 </div>
 <div class="row center">
 <button class="btn" id="mutebtn" onclick="toggleMute()" data-i18n="mute">Mute</button>
+<button class="btn accent" id="audiobtn" onclick="toggleAudio()" data-i18n="audio_play">Listen</button>
 </div>
 </div>
 
@@ -145,8 +146,8 @@ let repeatTimer=null;
 let sse=null;
 
 const LANG={
-en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
-zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",wifi_settings:"Wi-Fi 设置",system_settings:"系统",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
+en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",audio_play:"Listen",audio_stop:"Stop Audio",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
+zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",audio_play:"收听",audio_stop:"停止收听",wifi_settings:"Wi-Fi 设置",system_settings:"系统",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
 };
 
 let curLang='en';
@@ -200,6 +201,76 @@ btn.className='btn'+(muted?' muted-active':'');
 }
 
 function toggleMute(){muted=!muted;api('/api/mute',{mute:muted});updateMuteBtn()}
+
+// --- Web Audio via WebSocket ---
+let audioCtx=null,audioWs=null,audioNode=null,audioPlaying=false;
+
+function updateAudioBtn(){
+const btn=document.getElementById('audiobtn');
+const t=LANG[curLang]||LANG.en;
+btn.textContent=audioPlaying?t.audio_stop:t.audio_play;
+btn.className='btn'+(audioPlaying?' muted-active':' accent');
+}
+
+async function startAudio(){
+try{
+audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+await audioCtx.resume();
+
+const wk=new Blob([`
+class PCMPlayer extends AudioWorkletProcessor{
+constructor(){
+super();
+this.buf=new Float32Array(44100*2);
+this.wr=0;this.rd=0;this.len=0;
+this.port.onmessage=(e)=>{
+const r=new Int16Array(e.data);
+for(let i=0;i<r.length;i++){
+if(this.len>=this.buf.length)break;
+this.buf[this.wr]=r[i]/32768;
+this.wr=(this.wr+1)%this.buf.length;
+this.len++;
+}
+};
+}
+process(_,outs){
+const n=outs[0][0].length;
+for(let i=0;i<n;i++){
+if(this.len<2){break;}
+outs[0][0][i]=this.buf[this.rd];
+outs[0][1][i]=this.buf[(this.rd+1)%this.buf.length];
+this.rd=(this.rd+2)%this.buf.length;
+this.len-=2;
+}
+return true;
+}
+}
+registerProcessor('pcm-player',PCMPlayer);
+`],{type:'application/javascript'});
+await audioCtx.audioWorklet.addModule(URL.createObjectURL(wk));
+audioNode=new AudioWorkletNode(audioCtx,'pcm-player');
+audioNode.connect(audioCtx.destination);
+
+audioWs=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/api/audio');
+audioWs.binaryType='arraybuffer';
+audioWs.onmessage=(e)=>{if(audioNode)audioNode.port.postMessage(e.data);};
+audioWs.onclose=()=>{stopAudio();};
+audioWs.onerror=()=>{stopAudio();};
+
+audioPlaying=true;
+updateAudioBtn();
+}catch(err){alert('Audio init failed: '+err.message);stopAudio();}
+}
+
+function stopAudio(){
+audioPlaying=false;
+if(audioWs){audioWs.onclose=null;audioWs.close();audioWs=null;}
+if(audioNode){audioNode.disconnect();audioNode=null;}
+if(audioCtx){audioCtx.close();audioCtx=null;}
+updateAudioBtn();
+}
+
+function toggleAudio(){audioPlaying?stopAudio():startAudio();}
 
 function focusFreqInput(){
 const inp=document.getElementById('freqin');
@@ -377,10 +448,10 @@ fetch('/api/version').then(r=>r.json()).then(d=>{
 document.getElementById('footer').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
 }).catch(()=>{});
 document.addEventListener('visibilitychange',()=>{
-if(document.hidden)disconnectSSE();
+if(document.hidden){disconnectSSE();stopAudio();}
 else connectSSE();
 });
-window.addEventListener('beforeunload',disconnectSSE);
+window.addEventListener('beforeunload',()=>{disconnectSSE();stopAudio();});
 </script>
 </body>
 </html>
