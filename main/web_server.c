@@ -585,21 +585,51 @@ static bool ws_audio_has_clients(void)
     return false;
 }
 
+static bool ws_audio_lock(TickType_t ticks_to_wait)
+{
+    return s_ws_ring_mutex && xSemaphoreTake(s_ws_ring_mutex, ticks_to_wait) == pdTRUE;
+}
+
+static void ws_audio_unlock(void)
+{
+    if (s_ws_ring_mutex) {
+        xSemaphoreGive(s_ws_ring_mutex);
+    }
+}
+
+static void ws_audio_reset_ring_locked(void)
+{
+    if (!s_ws_audio_ring) {
+        return;
+    }
+
+    while (true) {
+        size_t item_size = 0;
+        void *item = xRingbufferReceiveUpTo(s_ws_audio_ring, &item_size, 0, WS_AUDIO_RING_SIZE);
+        if (!item) {
+            break;
+        }
+        vRingbufferReturnItem(s_ws_audio_ring, item);
+    }
+}
+
 // Audio callback — runs in audio_task context (prio 6). Must be FAST.
 static void ws_audio_data_cb(const uint8_t *data, size_t len, void *ctx)
 {
     (void)ctx;
     if (!s_ws_audio_ring || !ws_audio_has_clients()) return;
+    if (!ws_audio_lock(0)) return;
 
-    xSemaphoreTake(s_ws_ring_mutex, 0);
     if (xRingbufferSend(s_ws_audio_ring, data, len, 0) != pdTRUE) {
         // Overflow — drop oldest to make room
-        size_t dummy_size;
+        size_t dummy_size = 0;
         void *dummy = xRingbufferReceiveUpTo(s_ws_audio_ring, &dummy_size, 0, len);
-        if (dummy) vRingbufferReturnItem(s_ws_audio_ring, dummy);
-        xRingbufferSend(s_ws_audio_ring, data, len, 0);
+        if (dummy) {
+            vRingbufferReturnItem(s_ws_audio_ring, dummy);
+        }
+        (void)xRingbufferSend(s_ws_audio_ring, data, len, 0);
     }
-    xSemaphoreGive(s_ws_ring_mutex);
+    ws_audio_unlock();
 }
 
 // Completely independent task — never blocks httpd or audio_task.
@@ -607,19 +637,28 @@ static void ws_audio_sender_fn(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "ws audio sender task started");
-    s_ws_audio_running = true;
 
     while (s_ws_audio_running) {
+        bool ring_locked = false;
+
         vTaskDelay(pdMS_TO_TICKS(WS_AUDIO_POLL_MS));
-        if (!ws_audio_has_clients() || !s_ws_audio_ring) continue;
+        if (!ws_audio_has_clients() || !s_ws_audio_ring) {
+            continue;
+        }
 
         // Drain available data from ring buffer (mutex-protected)
-        xSemaphoreTake(s_ws_ring_mutex, portMAX_DELAY);
-        while (true) {
+        if (!ws_audio_lock(portMAX_DELAY)) {
+            continue;
+        }
+        ring_locked = true;
+
+        while (s_ws_audio_running) {
             size_t item_size = 0;
             uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(
                 s_ws_audio_ring, &item_size, 0, WS_AUDIO_CHUNK_SIZE);
-            if (!data || item_size == 0) break;
+            if (!data || item_size == 0) {
+                break;
+            }
 
             // Copy data so we can release ring buffer item before potentially blocking send
             uint8_t *send_buf = malloc(item_size);
@@ -629,7 +668,8 @@ static void ws_audio_sender_fn(void *arg)
             }
             memcpy(send_buf, data, item_size);
             vRingbufferReturnItem(s_ws_audio_ring, data);
-            xSemaphoreGive(s_ws_ring_mutex);
+            ws_audio_unlock();
+            ring_locked = false;
 
             httpd_ws_frame_t pkt = {
                 .final = true,
@@ -651,12 +691,17 @@ static void ws_audio_sender_fn(void *arg)
 
             free(send_buf);
 
-            // Re-acquire mutex for next chunk
-            if (!s_ws_audio_running) break;
-            xSemaphoreTake(s_ws_ring_mutex, portMAX_DELAY);
+            if (!s_ws_audio_running) {
+                break;
+            }
+            if (!ws_audio_lock(portMAX_DELAY)) {
+                break;
+            }
+            ring_locked = true;
         }
-        if (xSemaphoreGetMutexHolder(s_ws_ring_mutex) == xTaskGetCurrentTaskHandle()) {
-            xSemaphoreGive(s_ws_ring_mutex);
+
+        if (ring_locked) {
+            ws_audio_unlock();
         }
     }
 
@@ -683,6 +728,8 @@ static void http_session_close_cb(httpd_handle_t hd, int sockfd)
 static esp_err_t h_ws_audio(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
+        bool had_clients = ws_audio_has_clients();
+
         // Pre-handshake: find a slot for this client
         int slot = -1;
         for (int i = 0; i < WS_AUDIO_MAX_CLIENTS; i++) {
@@ -697,16 +744,9 @@ static esp_err_t h_ws_audio(httpd_req_t *req)
         s_ws_clients[slot].fd = fd;
         s_ws_clients[slot].active = true;
 
-        // Reset ring buffer to avoid stale data (mutex-protected)
-        if (s_ws_audio_ring && s_ws_ring_mutex) {
-            xSemaphoreTake(s_ws_ring_mutex, pdMS_TO_TICKS(100));
-            while (true) {
-                size_t sz;
-                void *d = xRingbufferReceiveUpTo(s_ws_audio_ring, &sz, 0, WS_AUDIO_RING_SIZE);
-                if (!d) break;
-                vRingbufferReturnItem(s_ws_audio_ring, d);
-            }
-            xSemaphoreGive(s_ws_ring_mutex);
+        if (!had_clients && ws_audio_lock(pdMS_TO_TICKS(100))) {
+            ws_audio_reset_ring_locked();
+            ws_audio_unlock();
         }
 
         ESP_LOGI(TAG, "ws audio client connected fd=%d slot=%d", fd, slot);
@@ -792,12 +832,31 @@ static esp_err_t send_json_response(httpd_req_t *req, cJSON *root)
 static cJSON *parse_body(httpd_req_t *req)
 {
     int len = req->content_len;
-    if (len <= 0 || len > 256) return NULL;
+    if (len <= 0 || len > 256) {
+        return NULL;
+    }
+
     char buf[257];
-    int received = httpd_req_recv(req, buf, len);
-    if (received <= 0) return NULL;
-    buf[received] = '\0';
-    return cJSON_Parse(buf);
+    int offset = 0;
+    int timeout_count = 0;
+    while (offset < len) {
+        int received = httpd_req_recv(req, buf + offset, len - offset);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            timeout_count++;
+            if (timeout_count >= 3) {
+                return NULL;
+            }
+            continue;
+        }
+        if (received <= 0) {
+            return NULL;
+        }
+        timeout_count = 0;
+        offset += received;
+    }
+
+    buf[len] = '\0';
+    return cJSON_ParseWithLength(buf, (size_t)len);
 }
 
 static void add_wifi_state(cJSON *root)
@@ -1502,8 +1561,10 @@ esp_err_t web_server_start(void)
             ESP_LOGE(TAG, "register ws /api/audio failed: %s", esp_err_to_name(err));
         }
 
+        s_ws_audio_running = true;
         if (xTaskCreate(ws_audio_sender_fn, "ws_audio", WS_AUDIO_SEND_STACK, NULL,
                         WS_AUDIO_SEND_PRIO, (TaskHandle_t *)&s_ws_audio_task) != pdPASS) {
+            s_ws_audio_running = false;
             ESP_LOGE(TAG, "failed to create ws audio sender task");
         } else {
             audio_register_data_cb(ws_audio_data_cb, NULL);
@@ -1532,9 +1593,9 @@ void web_server_stop(void)
     // Stop WS audio sender task
     s_ws_audio_running = false;
     if (s_ws_audio_task) {
-        // Wait for sender task to exit its loop and self-delete
-        vTaskDelay(pdMS_TO_TICKS(WS_AUDIO_POLL_MS * 3));
-        s_ws_audio_task = NULL;
+        while (s_ws_audio_task != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(WS_AUDIO_POLL_MS));
+        }
     }
     for (int i = 0; i < WS_AUDIO_MAX_CLIENTS; i++) {
         s_ws_clients[i].active = false;

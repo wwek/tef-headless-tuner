@@ -309,17 +309,13 @@ static void audio_ring_push(const uint8_t *data, size_t len)
 
 esp_err_t audio_init(const audio_config_t *config)
 {
-#if !CFG_TUD_AUDIO
-    (void)config;
-    ESP_LOGW(TAG, "TinyUSB audio class is disabled; USB audio path is unavailable");
-    return ESP_ERR_NOT_SUPPORTED;
-#else
     if (!config) {
         return ESP_ERR_INVALID_ARG;
     }
 
     i2s_data_bit_width_t width = audio_data_bit_width_from_config(config->bits_per_sample);
 
+#if CFG_TUD_AUDIO
     s_ring_buf = xRingbufferCreateWithCaps(
         AUDIO_RING_BUF_SIZE,
         RINGBUF_TYPE_NOSPLIT,
@@ -329,12 +325,22 @@ esp_err_t audio_init(const audio_config_t *config)
         ESP_LOGE(TAG, "Failed to create internal audio ring buffer");
         return ESP_ERR_NO_MEM;
     }
+#else
+    s_ring_buf = NULL;
+    ESP_LOGW(TAG, "TinyUSB audio class is disabled; running I2S capture without USB audio streaming");
+#endif
 
     // Create I2S RX channel (slave mode - TEF6686 is I2S master)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(config->i2s_port, I2S_ROLE_SLAVE);
     chan_cfg.auto_clear = false;
     esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx_chan);
     if (err != ESP_OK) {
+#if CFG_TUD_AUDIO
+        if (s_ring_buf) {
+            vRingbufferDeleteWithCaps(s_ring_buf);
+            s_ring_buf = NULL;
+        }
+#endif
         ESP_LOGE(TAG, "Failed to create I2S channel: %s", esp_err_to_name(err));
         return err;
     }
@@ -362,6 +368,14 @@ esp_err_t audio_init(const audio_config_t *config)
 
     err = i2s_channel_init_std_mode(s_rx_chan, &std_cfg);
     if (err != ESP_OK) {
+        (void)i2s_del_channel(s_rx_chan);
+        s_rx_chan = NULL;
+#if CFG_TUD_AUDIO
+        if (s_ring_buf) {
+            vRingbufferDeleteWithCaps(s_ring_buf);
+            s_ring_buf = NULL;
+        }
+#endif
         ESP_LOGE(TAG, "Failed to init I2S std mode: %s", esp_err_to_name(err));
         return err;
     }
@@ -370,6 +384,7 @@ esp_err_t audio_init(const audio_config_t *config)
     s_clock_valid = 1;
     memset(s_mute, 0, sizeof(s_mute));
     memset(s_volume, 0, sizeof(s_volume));
+    audio_ring_reset();
     audio_usb_state_reset();
     s_sample_rate_range.wNumSubRanges = tu_htole16(1);
     s_sample_rate_range.subrange[0].bMin = (int32_t)config->sample_rate;
@@ -382,7 +397,6 @@ esp_err_t audio_init(const audio_config_t *config)
              (unsigned)AUDIO_RING_BUF_SIZE,
              config->bclk_pin, config->ws_pin, config->data_pin);
     return ESP_OK;
-#endif
 }
 
 static void feed_usb_audio(void)
@@ -429,17 +443,25 @@ static void feed_usb_audio(void)
 
 static void audio_task_fn(void *arg)
 {
+    (void)arg;
     ESP_LOGI(TAG, "Audio task started");
     uint8_t buf[AUDIO_FRAME_BYTES];
 
     audio_ring_reset();
     audio_usb_state_reset();
-    i2s_channel_enable(s_rx_chan);
-    s_running = true;
+
+    esp_err_t err = i2s_channel_enable(s_rx_chan);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable I2S channel: %s", esp_err_to_name(err));
+        s_running = false;
+        s_audio_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
 
     while (s_running) {
         size_t bytes_read = 0;
-        esp_err_t err = i2s_channel_read(s_rx_chan, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(100));
+        err = i2s_channel_read(s_rx_chan, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(100));
         if (err == ESP_OK && bytes_read > 0) {
             for (int i = 0; i < MAX_AUDIO_CONSUMERS; i++) {
                 if (s_consumers[i].cb) {
@@ -454,19 +476,19 @@ static void audio_task_fn(void *arg)
         feed_usb_audio();
     }
 
-    i2s_channel_disable(s_rx_chan);
+    (void)i2s_channel_disable(s_rx_chan);
+    s_running = false;
+    s_audio_task = NULL;
     ESP_LOGI(TAG, "Audio task stopped");
     vTaskDelete(NULL);
 }
 
 esp_err_t audio_start(void)
 {
-#if !CFG_TUD_AUDIO
-    return ESP_ERR_NOT_SUPPORTED;
-#else
-    if (s_running) return ESP_OK;
-    if (!s_rx_chan || !s_ring_buf) return ESP_ERR_INVALID_STATE;
+    if (s_running || s_audio_task != NULL) return ESP_OK;
+    if (!s_rx_chan) return ESP_ERR_INVALID_STATE;
 
+    s_running = true;
     BaseType_t ret = xTaskCreatePinnedToCore(
         audio_task_fn,
         "audio",
@@ -477,24 +499,25 @@ esp_err_t audio_start(void)
         CONFIG_AUDIO_TASK_CORE < 0 ? tskNO_AFFINITY : CONFIG_AUDIO_TASK_CORE
     );
     if (ret != pdPASS) {
+        s_running = false;
         ESP_LOGE(TAG, "Failed to create audio task");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
-#endif
 }
 
 esp_err_t audio_stop(void)
 {
-    if (!s_running) return ESP_OK;
+    if (!s_running && s_audio_task == NULL) return ESP_OK;
     s_running = false;
-    vTaskDelay(pdMS_TO_TICKS(200));
+    while (s_audio_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
     audio_ring_reset();
     audio_usb_state_reset();
 #if CFG_TUD_AUDIO
     (void)tud_audio_clear_ep_in_ff();
 #endif
-    s_audio_task = NULL;
     return ESP_OK;
 }
 

@@ -133,12 +133,13 @@ void app_main(void)
         .bits_per_sample = CONFIG_AUDIO_BITS_PER_SAMPLE,
     };
     err = audio_init(&audio_cfg);
-    if (err == ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGW(TAG, "USB audio class is not enabled in this build; running CDC-only");
-    } else if (err != ESP_OK) {
+    if (err != ESP_OK) {
         ESP_LOGE(TAG, "Audio init failed: %s", esp_err_to_name(err));
     } else {
-        audio_start();
+        err = audio_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Audio start failed: %s", esp_err_to_name(err));
+        }
     }
 
     // Start controller, then protocol adapters
