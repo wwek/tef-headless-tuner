@@ -36,6 +36,15 @@ config AUDIO_BITS_PER_SAMPLE
     help
         Audio bit depth (16 or 24).
 
+config AUDIO_TASK_CORE
+    int "Audio task CPU core (-1 = no affinity)"
+    default 1
+    range -1 1
+    help
+        CPU core for the I2S to USB audio bridge task. Keep the default on
+        core 1 so Wi-Fi/control work on core 0 does not compete with the
+        audio hot path.
+
 endmenu
 
 menu "Tuner Defaults"

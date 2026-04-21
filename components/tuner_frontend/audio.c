@@ -1,6 +1,7 @@
 #include "audio.h"
 #include "usb_audio_desc.h"
 #include "driver/i2s_std.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
@@ -11,14 +12,22 @@
 
 static const char *TAG = "audio";
 
-#define AUDIO_RING_BUF_SIZE (32 * 1024)
-#define AUDIO_FRAME_BYTES (((CONFIG_AUDIO_SAMPLE_RATE * 2 * (CONFIG_AUDIO_BITS_PER_SAMPLE / 8)) + 999) / 1000)
-#define AUDIO_RING_ITEM_COUNT (AUDIO_RING_BUF_SIZE / AUDIO_FRAME_BYTES)
-#define AUDIO_USB_PREROLL_BYTES (AUDIO_FRAME_BYTES * 8)
+#ifndef CONFIG_AUDIO_TASK_CORE
+#define CONFIG_AUDIO_TASK_CORE 1
+#endif
+
 #define AUDIO_CHANNEL_COUNT 2
+#define AUDIO_BYTES_PER_SAMPLE (CONFIG_AUDIO_BITS_PER_SAMPLE / 8)
+#define AUDIO_SAMPLE_FRAME_BYTES (AUDIO_CHANNEL_COUNT * AUDIO_BYTES_PER_SAMPLE)
+#define AUDIO_FRAME_SAMPLES (((CONFIG_AUDIO_SAMPLE_RATE) + 999) / 1000)
+#define AUDIO_FRAME_BYTES (AUDIO_FRAME_SAMPLES * AUDIO_SAMPLE_FRAME_BYTES)
+#define AUDIO_RING_BUF_SIZE (32 * 1024)
+#define AUDIO_USB_PREROLL_BYTES (AUDIO_FRAME_BYTES * 8)
 #define AUDIO_VOLUME_RANGE_MIN (-90 * 256)
 #define AUDIO_VOLUME_RANGE_MAX 0
 #define AUDIO_VOLUME_RANGE_RES 256
+#define AUDIO_TASK_STACK_BYTES 4096
+#define AUDIO_TASK_PRIO 6
 
 static i2s_chan_handle_t s_rx_chan;
 static TaskHandle_t s_audio_task;
@@ -33,6 +42,7 @@ static uint8_t s_usb_stage_buf[AUDIO_FRAME_BYTES];
 static size_t s_usb_stage_len;
 static size_t s_usb_stage_offset;
 static bool s_usb_preroll_done;
+static uint32_t s_ring_drop_count;
 
 #define MAX_AUDIO_CONSUMERS 4
 
@@ -202,6 +212,7 @@ static void audio_ring_reset(void)
 {
     if (!s_ring_buf) {
         s_ring_queued_bytes = 0;
+        s_ring_drop_count = 0;
         return;
     }
 
@@ -215,6 +226,7 @@ static void audio_ring_reset(void)
     }
 
     s_ring_queued_bytes = 0;
+    s_ring_drop_count = 0;
 }
 
 static void audio_usb_state_reset(void)
@@ -276,10 +288,22 @@ static void audio_ring_push(const uint8_t *data, size_t len)
         } else {
             s_ring_queued_bytes = 0;
         }
+        s_ring_drop_count++;
+        if (s_ring_drop_count == 1 || (s_ring_drop_count % 128) == 0) {
+            ESP_LOGW(TAG,
+                     "USB audio ring overflow: dropped=%" PRIu32 " last_drop=%u queued=%u capacity=%u",
+                     s_ring_drop_count,
+                     (unsigned)dropped_size,
+                     (unsigned)s_ring_queued_bytes,
+                     (unsigned)AUDIO_RING_BUF_SIZE);
+        }
     }
 
     if (xRingbufferSend(s_ring_buf, data, len, 0) == pdTRUE) {
         s_ring_queued_bytes += len;
+    } else {
+        ESP_LOGW(TAG, "USB audio ring write failed after drop: len=%u queued=%u",
+                 (unsigned)len, (unsigned)s_ring_queued_bytes);
     }
 }
 
@@ -296,10 +320,13 @@ esp_err_t audio_init(const audio_config_t *config)
 
     i2s_data_bit_width_t width = audio_data_bit_width_from_config(config->bits_per_sample);
 
-    // Create ring buffer for I2S -> USB audio pipeline
-    s_ring_buf = xRingbufferCreateNoSplit(AUDIO_FRAME_BYTES, AUDIO_RING_ITEM_COUNT);
+    s_ring_buf = xRingbufferCreateWithCaps(
+        AUDIO_RING_BUF_SIZE,
+        RINGBUF_TYPE_NOSPLIT,
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+    );
     if (!s_ring_buf) {
-        ESP_LOGE(TAG, "Failed to create audio ring buffer");
+        ESP_LOGE(TAG, "Failed to create internal audio ring buffer");
         return ESP_ERR_NO_MEM;
     }
 
@@ -349,8 +376,10 @@ esp_err_t audio_init(const audio_config_t *config)
     s_sample_rate_range.subrange[0].bMax = (int32_t)config->sample_rate;
     s_sample_rate_range.subrange[0].bRes = 0;
 
-    ESP_LOGI(TAG, "Audio initialized: %" PRIu32 "Hz %dbit stereo, BCLK=%d WS=%d DIN=%d",
+    ESP_LOGI(TAG, "Audio initialized: %" PRIu32 "Hz %dbit stereo, frame=%u bytes, ring=%u bytes, BCLK=%d WS=%d DIN=%d",
              config->sample_rate, config->bits_per_sample,
+             (unsigned)AUDIO_FRAME_BYTES,
+             (unsigned)AUDIO_RING_BUF_SIZE,
              config->bclk_pin, config->ws_pin, config->data_pin);
     return ESP_OK;
 #endif
@@ -438,7 +467,15 @@ esp_err_t audio_start(void)
     if (s_running) return ESP_OK;
     if (!s_rx_chan || !s_ring_buf) return ESP_ERR_INVALID_STATE;
 
-    BaseType_t ret = xTaskCreate(audio_task_fn, "audio", 4096, NULL, 6, &s_audio_task);
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        audio_task_fn,
+        "audio",
+        AUDIO_TASK_STACK_BYTES,
+        NULL,
+        AUDIO_TASK_PRIO,
+        &s_audio_task,
+        CONFIG_AUDIO_TASK_CORE < 0 ? tskNO_AFFINITY : CONFIG_AUDIO_TASK_CORE
+    );
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create audio task");
         return ESP_ERR_NO_MEM;

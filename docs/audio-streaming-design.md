@@ -48,7 +48,7 @@ TEF6686 (I2S Master, 44.1kHz/16bit/stereo)
 
 | Task | Priority | Stack | Role |
 |------|----------|-------|------|
-| audio_task | 6 | 4096 | I2S read → USB ring buffer → consumer dispatch |
+| audio_task | 6 | 4096 | I2S read → USB ring buffer → consumer dispatch (pinned to CPU1 by default) |
 | tusb_task | (TinyUSB internal) | 4096 | USB UAC2 endpoint (runs on CPU1) |
 | ws_audio | 4 | 6144 | Read WS ring buffer → send via WebSocket |
 | sse_worker | 5 | 4096 | SSE status push to web clients |
