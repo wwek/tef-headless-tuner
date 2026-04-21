@@ -3,7 +3,7 @@
 ## 1. System Topology
 
 ```
-TEF6686 (I2S Master, 44.1kHz/16bit/stereo)
+TEF6686 (I2S Master, 48kHz/16bit/stereo)
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
@@ -32,11 +32,11 @@ TEF6686 (I2S Master, 44.1kHz/16bit/stereo)
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| I2S role | **Slave** | TEF6686 is I2S clock master |
-| Sample rate | **44100 Hz** | Fixed by TEF6686 |
+| I2S role | **Slave** | TEF6686 is currently configured as I2S clock master |
+| Sample rate | **48000 Hz** | Explicitly configured on both TEF6686 and USB UAC |
 | Bit depth | 16-bit | Configurable (also supports 24-bit) |
 | Channels | Stereo (2) | Standard I2S Philips format |
-| Bitrate | 44100 x 2 x 16 = **1.41 Mbps** (176 KB/s) | |
+| Bitrate | 48000 x 2 x 16 = **1.54 Mbps** (192 KB/s) | |
 | CPU | Dual-core Xtensa LX7, 240 MHz | Currently 160 MHz, can increase |
 | PSRAM | 8MB (Octal, 80 MHz) | Used for WS ring buffer |
 | Flash | 16MB | Dual OTA partitions (4MB each) |
@@ -68,7 +68,7 @@ The core design principle is that **no task blocks another task's critical path*
 
 A zero-copy reference counting approach was considered but rejected for this project:
 
-- With only 2 consumers (USB + WS), the memcpy overhead is ~178 bytes/frame at 44.1kHz — negligible on a 240 MHz CPU.
+- With only 2 consumers (USB + WS), the memcpy overhead is 192 bytes/frame at 48kHz — negligible on a 240 MHz CPU.
 - Per-frame malloc/free introduces heap fragmentation risk in a long-running embedded system.
 - The ring buffer approach has predictable memory usage and simple overflow behavior (drop oldest).
 - Reference counting adds atomic operation overhead and complex free-timing bugs that are hard to debug.
@@ -140,7 +140,7 @@ This ensures the I2S reader never blocks, and data loss is graceful (oldest drop
 ### 5.2 Data Format
 
 Raw PCM binary frames, same format as I2S output:
-- 44100 Hz sample rate
+- 48000 Hz sample rate
 - 16-bit signed little-endian
 - Stereo, interleaved (L R L R ...)
 - No header or framing — each WebSocket binary message is a contiguous PCM chunk
@@ -186,11 +186,11 @@ WebSocket onmessage (binary ArrayBuffer)
     ▼
 AudioWorklet (via Blob URL)
     │  PCMPlayer processor:
-    │  - Circular Float32 buffer (44100*2 samples = 1 second)
+    │  - Circular Float32 buffer (48000*2 samples = 1 second)
     │  - Int16 → Float32 conversion on receive
-    │  - Dequeues 128-sample frames at 44.1kHz rate
+    │  - Dequeues 128-sample frames at 48kHz rate
     ▼
-AudioContext (44100 Hz, stereo)
+AudioContext (48000 Hz, stereo)
     │
     ▼
 Audio Output (speakers)
@@ -198,7 +198,7 @@ Audio Output (speakers)
 
 ### 7.2 Jitter Buffer
 
-The AudioWorklet maintains a circular buffer of 44100*2 samples (1 second at stereo). This absorbs WiFi jitter up to ~1 second. Under normal conditions, the buffer stays at ~100-200ms fill level.
+The AudioWorklet maintains a circular buffer of 48000*2 samples (1 second at stereo). This absorbs WiFi jitter up to ~1 second. Under normal conditions, the buffer stays at ~100-200ms fill level.
 
 ### 7.3 Latency Budget
 

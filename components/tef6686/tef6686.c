@@ -3,8 +3,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <string.h>
+#include <inttypes.h>
 #include <stdarg.h>
+#include <string.h>
 
 // Include firmware patches
 #include "tef6686_patch_v102.h"
@@ -67,6 +68,7 @@ static const char *TAG = "tef6686";
 #define AUDIO_SET_VOLUME      10
 #define AUDIO_SET_MUTE        11
 #define AUDIO_SET_INPUT       12
+#define AUDIO_SET_DIG_IO      22
 #define AUDIO_SET_WAVEGEN     24
 
 // Init table (from PE5PVB reference, configures FM parameters)
@@ -83,7 +85,6 @@ static const uint8_t s_init_tab[][18] = {
     { 9, 0x20, 0x4A, 0x01, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x8C},
     { 7, 0x20, 0x4B, 0x01, 0x00, 0x00, 0x0F, 0xA0},
     { 7, 0x30, 0x15, 0x01, 0x00, 0x80, 0x00, 0x01},
-    {13, 0x30, 0x16, 0x01, 0x00, 0x21, 0x00, 0x02, 0x00, 0x10, 0x01, 0x00, 0x12, 0xc0},
     { 7, 0x30, 0x0d, 0x01, 0x00, 0x80, 0x00, 0xe0},
     {0}, // end marker
 };
@@ -478,6 +479,34 @@ esp_err_t tef6686_set_wavegen(bool on, int16_t amplitude, uint16_t freq)
 esp_err_t tef6686_set_i2s_input(bool on)
 {
     return tef_send_cmd(MOD_AUDIO, AUDIO_SET_INPUT, 1, on ? 32 : 0);
+}
+
+esp_err_t tef6686_set_i2s_output(uint32_t sample_rate_hz)
+{
+    uint16_t tef_sample_rate;
+
+    switch (sample_rate_hz) {
+        case 44100:
+            tef_sample_rate = 4410;
+            break;
+        case 48000:
+            tef_sample_rate = 4800;
+            break;
+        default:
+            ESP_LOGE(TAG, "unsupported TEF I2S output sample rate: %" PRIu32, sample_rate_hz);
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    return tef_send_cmd(
+        MOD_AUDIO,
+        AUDIO_SET_DIG_IO,
+        5,
+        33,              // I2S digital audio output IIS_SD_1
+        2,               // 16-bit I2S format
+        16,              // digital audio source
+        256,             // TEF6686 drives BCK/WS in master mode
+        tef_sample_rate  // TEF API uses sample rate in 10 Hz units
+    );
 }
 
 // --- Public API: FM signal processing ---

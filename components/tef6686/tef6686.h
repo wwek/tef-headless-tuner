@@ -98,6 +98,7 @@ esp_err_t tef6686_set_mute(bool mute);
 esp_err_t tef6686_set_specials(uint16_t audio);
 esp_err_t tef6686_set_wavegen(bool on, int16_t amplitude, uint16_t freq);
 esp_err_t tef6686_set_i2s_input(bool on);
+esp_err_t tef6686_set_i2s_output(uint32_t sample_rate_hz);
 
 // --- FM signal processing ---
 

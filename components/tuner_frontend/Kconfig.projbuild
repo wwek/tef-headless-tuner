@@ -26,9 +26,10 @@ config AUDIO_DATA_PIN
 
 config AUDIO_SAMPLE_RATE
     int "Audio sample rate (Hz)"
-    default 44100
+    default 48000
     help
-        USB audio sample rate.
+        USB and TEF6686 I2S audio sample rate. TEF6686 supports 44100 and
+        48000 Hz; 48000 Hz is the simpler USB full-speed default.
 
 config AUDIO_BITS_PER_SAMPLE
     int "Bits per sample"

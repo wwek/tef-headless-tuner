@@ -76,9 +76,22 @@ void app_main(void)
         ESP_LOGE(TAG, "TEF6686 init failed: %s", esp_err_to_name(err));
     } else {
         tef_ready = true;
-        tef6686_set_volume(CONFIG_TUNER_DEFAULT_VOLUME);
-        tef6686_set_rds(true);
-        tef6686_set_deemphasis(50);
+        err = tef6686_set_volume(CONFIG_TUNER_DEFAULT_VOLUME);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "TEF6686 volume setup failed: %s", esp_err_to_name(err));
+        }
+        err = tef6686_set_i2s_output(CONFIG_AUDIO_SAMPLE_RATE);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "TEF6686 I2S output setup failed: %s", esp_err_to_name(err));
+        }
+        err = tef6686_set_rds(true);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "TEF6686 RDS setup failed: %s", esp_err_to_name(err));
+        }
+        err = tef6686_set_deemphasis(50);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "TEF6686 deemphasis setup failed: %s", esp_err_to_name(err));
+        }
 #if CONFIG_TUNER_DEFAULT_BAND_FM
         tef6686_set_band(TEF_BAND_FM);
         tef6686_tune_fm(87500);
