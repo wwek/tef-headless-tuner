@@ -138,6 +138,15 @@ static void set_restore_sta_state(const char *ssid, const char *password)
     s_restore_pass[sizeof(s_restore_pass) - 1] = '\0';
 }
 
+static bool active_sta_credentials_match(const char *ssid, const char *password)
+{
+    const char *normalized_password = password ? password : "";
+
+    return s_has_active_sta_config
+        && strcmp(s_active_ssid, ssid) == 0
+        && strcmp(s_active_pass, normalized_password) == 0;
+}
+
 // Build AP SSID from prefix + last 2 bytes of MAC
 static void build_ap_ssid(void)
 {
@@ -241,6 +250,12 @@ static esp_err_t load_active_sta_credentials(void)
 
 static esp_err_t write_active_sta_credentials(const char *ssid, const char *password)
 {
+    const char *normalized_password = password ? password : "";
+
+    if (active_sta_credentials_match(ssid, normalized_password)) {
+        return ESP_OK;
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
@@ -250,7 +265,7 @@ static esp_err_t write_active_sta_credentials(const char *ssid, const char *pass
 
     err = nvs_set_str(handle, NVS_KEY_STA_SSID, ssid);
     if (err == ESP_OK) {
-        err = nvs_set_str(handle, NVS_KEY_STA_PASS, password ? password : "");
+        err = nvs_set_str(handle, NVS_KEY_STA_PASS, normalized_password);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
@@ -262,7 +277,7 @@ static esp_err_t write_active_sta_credentials(const char *ssid, const char *pass
         return err;
     }
 
-    set_active_sta_state(ssid, password);
+    set_active_sta_state(ssid, normalized_password);
     return ESP_OK;
 }
 
@@ -275,9 +290,22 @@ static esp_err_t erase_active_sta_credentials(void)
         return err;
     }
 
-    nvs_erase_key(handle, NVS_KEY_STA_SSID);
-    nvs_erase_key(handle, NVS_KEY_STA_PASS);
-    err = nvs_commit(handle);
+    bool needs_commit = false;
+    esp_err_t ssid_err = nvs_erase_key(handle, NVS_KEY_STA_SSID);
+    esp_err_t pass_err = nvs_erase_key(handle, NVS_KEY_STA_PASS);
+
+    if (ssid_err == ESP_OK || pass_err == ESP_OK) {
+        needs_commit = true;
+    }
+    if (ssid_err != ESP_OK && ssid_err != ESP_ERR_NVS_NOT_FOUND) {
+        err = ssid_err;
+    } else if (pass_err != ESP_OK && pass_err != ESP_ERR_NVS_NOT_FOUND) {
+        err = pass_err;
+    } else if (needs_commit) {
+        err = nvs_commit(handle);
+    } else {
+        err = ESP_OK;
+    }
     nvs_close(handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS commit after clear failed: %s", esp_err_to_name(err));
@@ -630,6 +658,13 @@ esp_err_t wifi_manager_init(void)
         return err;
     }
     s_wifi_inited = true;
+
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi storage mode setup failed: %s", esp_err_to_name(err));
+        wifi_manager_cleanup_partial_init();
+        return err;
+    }
 
     // Disable WiFi power save for real-time audio streaming latency
     esp_wifi_set_ps(WIFI_PS_NONE);

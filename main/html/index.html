@@ -173,6 +173,7 @@ box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}
 let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false,curBw=0;
 let repeatTimer=null;
 let sse=null;
+let tuneInFlight=false,tuneQueued=null,tuneLastSent=null;
 let spectrum={active:false,status:'idle',scanId:0,start:0,end:0,step:100,total:0,points:[],holdPoints:[],drawReq:0,hoverIndex:-1,autoScale:true,hold:false};
 const SPECTRUM_KEY='tef_spectrum_v2';
 
@@ -222,9 +223,31 @@ return'#2ecc71';
 async function api(path,body){
 await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 }
-function tune(f,b){
+async function flushTuneQueue(){
+if(tuneInFlight||!tuneQueued)return;
+const target=tuneQueued;
+tuneQueued=null;
+if(tuneLastSent&&tuneLastSent.freq===target.freq&&tuneLastSent.band===target.band)return;
+tuneInFlight=true;
+tuneLastSent=target;
+try{
+await api('/api/tune',target);
+}catch(e){
+tuneLastSent=null;
+}finally{
+tuneInFlight=false;
+if(tuneQueued)setTimeout(flushTuneQueue,0);
+}
+}
+function queueTune(f,b){
 if(spectrum.active){setSpectrumStatus('busy');return;}
-api('/api/tune',{freq:f,band:b})
+const freq=parseInt(f);
+if(!freq||!b)return;
+tuneQueued={freq,band:b};
+flushTuneQueue();
+}
+function tune(f,b){
+queueTune(f,b);
 }
 function seekStop(){api('/api/seekstop',{})}
 function setVolume(v){document.getElementById('volv').textContent=v;api('/api/volume',{volume:+v})}
@@ -716,11 +739,7 @@ btn.textContent=audioPlaying?t.audio_stop:t.audio_play;
 btn.className='btn'+(audioPlaying?' muted-active':' accent');
 }
 
-async function startAudio(){
-try{
-audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
-await audioCtx.resume();
-
+async function createAudioWorkletSink(ctx){
 const wk=new Blob([`
 class PCMPlayer extends AudioWorkletProcessor{
 constructor(){
@@ -751,13 +770,70 @@ return true;
 }
 registerProcessor('pcm-player',PCMPlayer);
 `],{type:'application/javascript'});
-await audioCtx.audioWorklet.addModule(URL.createObjectURL(wk));
-audioNode=new AudioWorkletNode(audioCtx,'pcm-player');
-audioNode.connect(audioCtx.destination);
+const url=URL.createObjectURL(wk);
+try{
+await ctx.audioWorklet.addModule(url);
+}finally{
+URL.revokeObjectURL(url);
+}
+const node=new AudioWorkletNode(ctx,'pcm-player');
+node.connect(ctx.destination);
+return{
+node,
+push(data){node.port.postMessage(data,[data])},
+close(){node.disconnect()}
+};
+}
+
+function createScriptProcessorSink(ctx){
+const node=ctx.createScriptProcessor(2048,0,2);
+const buf=new Float32Array(44100*2);
+let wr=0,rd=0,len=0;
+node.onaudioprocess=(e)=>{
+const left=e.outputBuffer.getChannelData(0);
+const right=e.outputBuffer.getChannelData(1);
+for(let i=0;i<left.length;i++){
+if(len<2){
+left[i]=0;
+right[i]=0;
+continue;
+}
+left[i]=buf[rd];
+right[i]=buf[(rd+1)%buf.length];
+rd=(rd+2)%buf.length;
+len-=2;
+}
+};
+node.connect(ctx.destination);
+return{
+node,
+push(data){
+const r=new Int16Array(data);
+for(let i=0;i<r.length;i++){
+if(len>=buf.length){
+rd=(rd+2)%buf.length;
+len-=2;
+}
+buf[wr]=r[i]/32768;
+wr=(wr+1)%buf.length;
+len++;
+}
+},
+close(){node.disconnect()}
+};
+}
+
+async function startAudio(){
+try{
+audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+await audioCtx.resume();
+audioNode=(audioCtx.audioWorklet&&window.AudioWorkletNode)
+?await createAudioWorkletSink(audioCtx)
+:createScriptProcessorSink(audioCtx);
 
 audioWs=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/api/audio');
 audioWs.binaryType='arraybuffer';
-audioWs.onmessage=(e)=>{if(audioNode)audioNode.port.postMessage(e.data);};
+audioWs.onmessage=(e)=>{if(audioNode)audioNode.push(e.data);};
 audioWs.onclose=()=>{stopAudio();};
 audioWs.onerror=()=>{stopAudio();};
 
@@ -769,7 +845,7 @@ updateAudioBtn();
 function stopAudio(){
 audioPlaying=false;
 if(audioWs){audioWs.onclose=null;audioWs.close();audioWs=null;}
-if(audioNode){audioNode.disconnect();audioNode=null;}
+if(audioNode){audioNode.close();audioNode=null;}
 if(audioCtx){audioCtx.close();audioCtx=null;}
 updateAudioBtn();
 }
@@ -790,7 +866,7 @@ tune(f,curBand);
 
 function repeatStart(fn,arg){
 fn(arg);
-repeatTimer=setInterval(()=>fn(arg),200);
+repeatTimer=setInterval(()=>fn(arg),350);
 }
 function repeatStop(){
 if(repeatTimer){clearInterval(repeatTimer);repeatTimer=null}

@@ -18,6 +18,7 @@
 #include "freertos/queue.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 #include "cJSON.h"
 #include <inttypes.h>
 #include <string.h>
@@ -37,6 +38,18 @@ static httpd_handle_t s_server;
 
 static esp_err_t set_cors_headers(httpd_req_t *req);
 static void sse_broadcast(const char *event, const char *json);
+
+static void close_http_session_after_response(httpd_req_t *req)
+{
+    if (req == NULL || req->handle == NULL) {
+        return;
+    }
+
+    int sockfd = httpd_req_to_sockfd(req);
+    if (sockfd >= 0) {
+        (void)httpd_sess_trigger_close(req->handle, sockfd);
+    }
+}
 
 static const char *wifi_mode_name(wifi_mgr_mode_t mode)
 {
@@ -662,6 +675,8 @@ static void http_session_close_cb(httpd_handle_t hd, int sockfd)
             s_ws_clients[i].fd = -1;
         }
     }
+
+    close(sockfd);
 }
 
 // WS /api/audio handler — only handles handshake + incoming control frames.
@@ -737,15 +752,40 @@ static esp_err_t set_cors_headers(httpd_req_t *req)
     return httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 }
 
-static esp_err_t send_json_response(httpd_req_t *req, cJSON *root)
+static esp_err_t set_short_response_headers(httpd_req_t *req)
 {
     esp_err_t err = set_cors_headers(req);
+    if (err != ESP_OK) return err;
+    return httpd_resp_set_hdr(req, "Connection", "close");
+}
+
+static esp_err_t send_json_response(httpd_req_t *req, cJSON *root)
+{
+    if (root == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"json allocation failed\"}");
+        close_http_session_after_response(req);
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = set_short_response_headers(req);
     if (err != ESP_OK) return err;
     err = httpd_resp_set_type(req, "application/json");
     if (err != ESP_OK) return err;
     char *json = cJSON_PrintUnformatted(root);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "JSON print failed for %s", req->uri);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"json print failed\"}");
+        close_http_session_after_response(req);
+        return ESP_FAIL;
+    }
     err = httpd_resp_sendstr(req, json);
     free(json);
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
     return err;
 }
 
@@ -762,6 +802,10 @@ static cJSON *parse_body(httpd_req_t *req)
 
 static void add_wifi_state(cJSON *root)
 {
+    if (root == NULL) {
+        return;
+    }
+
     char ap_ssid[32] = {0};
     const char *ip = wifi_manager_get_ip();
     wifi_mgr_mode_t mode = wifi_manager_get_mode();
@@ -776,6 +820,10 @@ static void add_wifi_state(cJSON *root)
 
 static void add_system_state(cJSON *root)
 {
+    if (root == NULL) {
+        return;
+    }
+
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
@@ -815,13 +863,17 @@ static void add_system_state(cJSON *root)
 
 static esp_err_t h_index(httpd_req_t *req)
 {
-    esp_err_t err = set_cors_headers(req);
+    esp_err_t err = set_short_response_headers(req);
     if (err != ESP_OK) return err;
     err = httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (err != ESP_OK) return err;
     size_t len = html_index_end - html_index_start;
     ESP_LOGI(TAG, "HTTP GET %s -> index (%u bytes)", req->uri, (unsigned)len);
-    return httpd_resp_send(req, html_index_start, len);
+    err = httpd_resp_send(req, html_index_start, len);
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_wifi_page(httpd_req_t *req)
@@ -829,7 +881,7 @@ static esp_err_t h_wifi_page(httpd_req_t *req)
     char ap_ssid[32] = {0};
     const char *ip = wifi_manager_get_ip();
 
-    esp_err_t err = set_cors_headers(req);
+    esp_err_t err = set_short_response_headers(req);
     if (err != ESP_OK) return err;
     err = httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (err != ESP_OK) return err;
@@ -842,18 +894,26 @@ static esp_err_t h_wifi_page(httpd_req_t *req)
              (int)wifi_manager_get_mode(),
              ap_ssid[0] ? ap_ssid : "<unset>",
              ip ? ip : "<none>");
-    return httpd_resp_send(req, html_wifi_start, len);
+    err = httpd_resp_send(req, html_wifi_start, len);
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_system_page(httpd_req_t *req)
 {
-    esp_err_t err = set_cors_headers(req);
+    esp_err_t err = set_short_response_headers(req);
     if (err != ESP_OK) return err;
     err = httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (err != ESP_OK) return err;
     size_t len = html_system_end - html_system_start;
     ESP_LOGI(TAG, "HTTP GET %s -> system page (%u bytes)", req->uri, (unsigned)len);
-    return httpd_resp_send(req, html_system_start, len);
+    err = httpd_resp_send(req, html_system_start, len);
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_get_version(httpd_req_t *req)
@@ -941,6 +1001,9 @@ static esp_err_t h_get_rds(httpd_req_t *req)
 
 static esp_err_t h_post_tune(httpd_req_t *req)
 {
+    esp_err_t header_err = set_short_response_headers(req);
+    if (header_err != ESP_OK) return header_err;
+
     cJSON *body = parse_body(req);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
@@ -1001,12 +1064,18 @@ static esp_err_t h_post_tune(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_post_seek(httpd_req_t *req)
 {
+    esp_err_t header_err = set_short_response_headers(req);
+    if (header_err != ESP_OK) return header_err;
+
     esp_err_t err;
     cJSON *body = parse_body(req);
     if (!body) {
@@ -1056,19 +1125,31 @@ static esp_err_t h_post_seek(httpd_req_t *req)
     }
 
     cJSON_Delete(body);
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_post_seekstop(httpd_req_t *req)
 {
+    esp_err_t header_err = set_short_response_headers(req);
+    if (header_err != ESP_OK) return header_err;
+
     tuner_controller_abort_seek();
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    esp_err_t err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_post_volume(httpd_req_t *req)
 {
+    esp_err_t header_err = set_short_response_headers(req);
+    if (header_err != ESP_OK) return header_err;
+
     cJSON *body = parse_body(req);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
@@ -1091,12 +1172,18 @@ static esp_err_t h_post_volume(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set volume failed");
         return ESP_FAIL;
     }
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_post_mute(httpd_req_t *req)
 {
+    esp_err_t header_err = set_short_response_headers(req);
+    if (header_err != ESP_OK) return header_err;
+
     cJSON *body = parse_body(req);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
@@ -1116,8 +1203,11 @@ static esp_err_t h_post_mute(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set mute failed");
         return ESP_FAIL;
     }
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
+    err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err == ESP_OK) {
+        close_http_session_after_response(req);
+    }
+    return err;
 }
 
 static esp_err_t h_post_spectrum_scan(httpd_req_t *req)
@@ -1309,16 +1399,20 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size        = 8192;
+    config.max_open_sockets = 7;
     config.max_uri_handlers  = 24;
     config.max_resp_headers  = 8;
+    config.lru_purge_enable  = true;
     config.uri_match_fn      = httpd_uri_match_wildcard;
     config.close_fn          = http_session_close_cb;
 
     ESP_LOGI(TAG,
-             "http server config: req_hdr_max=%d, uri_max=%d, handlers=%u, stack=%u",
+             "http server config: req_hdr_max=%d, uri_max=%d, handlers=%u, sockets=%u, lru=%d, stack=%u",
              HTTPD_MAX_REQ_HDR_LEN,
              HTTPD_MAX_URI_LEN,
              (unsigned)config.max_uri_handlers,
+             (unsigned)config.max_open_sockets,
+             config.lru_purge_enable ? 1 : 0,
              (unsigned)config.stack_size);
 
     esp_err_t err = httpd_start(&s_server, &config);
