@@ -6,10 +6,11 @@
 <title>TEF6686 System</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;max-width:480px;margin:0 auto;padding:12px}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;max-width:560px;margin:0 auto;padding:12px}
 a{color:#4ea8de}
 h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
 .card{background:#16213e;border-radius:10px;padding:14px;margin:10px 0}
+.section{color:#7fb6da;font-size:.78em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px}
 .row{display:flex;justify-content:space-between;gap:8px;margin:6px 0;align-items:center}
 .label{color:#aaa;font-size:.85em}
 .value{font-family:'Courier New',monospace;font-size:.9em;text-align:right;word-break:break-all}
@@ -23,10 +24,31 @@ h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
 <h1><span data-i18n="title">TEF6686 System</span><button class="lang-btn" id="langbtn" onclick="toggleLang()">中文</button></h1>
 
 <div class="card">
+<div class="section" data-i18n="firmware">Firmware</div>
 <div class="row"><span class="label" data-i18n="version">Version</span><span class="value" id="version">--</span></div>
 <div class="row"><span class="label" data-i18n="running">Running</span><span class="value" id="running">--</span></div>
 <div class="row"><span class="label" data-i18n="boot">Boot</span><span class="value" id="boot">--</span></div>
 <div class="row"><span class="label" data-i18n="next">Next OTA</span><span class="value" id="next">--</span></div>
+</div>
+
+<div class="card">
+<div class="section" data-i18n="hardware">Hardware & Runtime</div>
+<div class="row"><span class="label" data-i18n="chip_model">Chip Model</span><span class="value" id="chip_model">--</span></div>
+<div class="row"><span class="label" data-i18n="chip_revision">Revision</span><span class="value" id="chip_revision">--</span></div>
+<div class="row"><span class="label" data-i18n="cpu_cores">CPU Cores</span><span class="value" id="cpu_cores">--</span></div>
+<div class="row"><span class="label" data-i18n="flash_size">Flash Size</span><span class="value" id="flash_size">--</span></div>
+<div class="row"><span class="label" data-i18n="psram">PSRAM</span><span class="value" id="psram">--</span></div>
+<div class="row"><span class="label" data-i18n="free_heap">Free Heap</span><span class="value" id="free_heap">--</span></div>
+<div class="row"><span class="label" data-i18n="minimum_free_heap">Minimum Free Heap</span><span class="value" id="minimum_free_heap">--</span></div>
+<div class="row"><span class="label" data-i18n="uptime">Uptime</span><span class="value" id="uptime">--</span></div>
+</div>
+
+<div class="card">
+<div class="section" data-i18n="wifi">Wi-Fi</div>
+<div class="row"><span class="label" data-i18n="wifi_mode">Mode</span><span class="value" id="wifi_mode">--</span></div>
+<div class="row"><span class="label" data-i18n="wifi_connected">Connected</span><span class="value" id="wifi_connected">--</span></div>
+<div class="row"><span class="label" data-i18n="wifi_ip">IP</span><span class="value" id="wifi_ip">--</span></div>
+<div class="row"><span class="label" data-i18n="wifi_ap_ssid">AP SSID</span><span class="value" id="wifi_ap_ssid">--</span></div>
 </div>
 
 <div class="card">
@@ -40,11 +62,75 @@ h1{text-align:center;font-size:1.3em;padding:8px 0;border-bottom:1px solid #333}
 
 <script>
 const LANG={
-en:{title:"TEF6686 System",version:"Version",running:"Running",boot:"Boot",next:"Next OTA",note:"This page is intentionally read-only for now. Firmware updates are not exposed through the web UI in the current DIY/open-source phase.",back_home:"Back to Tuner",back_wifi:"Wi-Fi Settings",lang_label:"中文"},
-zh:{title:"TEF6686 系统",version:"版本",running:"当前运行",boot:"启动分区",next:"下一个 OTA 槽",note:"当前这个页面有意保持只读。现阶段作为开源 DIY 项目，暂不通过 Web UI 暴露固件升级功能。",back_home:"返回调谐器",back_wifi:"Wi-Fi 设置",lang_label:"EN"}
+en:{title:"TEF6686 System",firmware:"Firmware",hardware:"Hardware & Runtime",wifi:"Wi-Fi",version:"Version",running:"Running",boot:"Boot",next:"Next OTA",chip_model:"Chip Model",chip_revision:"Revision",cpu_cores:"CPU Cores",flash_size:"Flash Size",psram:"PSRAM",free_heap:"Free Heap",minimum_free_heap:"Minimum Free Heap",uptime:"Uptime",wifi_mode:"Mode",wifi_connected:"Connected",wifi_ip:"IP",wifi_ap_ssid:"AP SSID",yes:"Yes",no:"No",enabled:"Enabled",disabled:"Disabled",note:"This page is intentionally read-only for now. Firmware updates are not exposed through the web UI in the current DIY/open-source phase.",back_home:"Back to Tuner",back_wifi:"Wi-Fi Settings",lang_label:"中文"},
+zh:{title:"TEF6686 系统",firmware:"固件",hardware:"硬件与运行状态",wifi:"Wi-Fi",version:"版本",running:"当前运行",boot:"启动分区",next:"下一个 OTA 槽",chip_model:"芯片型号",chip_revision:"版本修订",cpu_cores:"CPU 核心数",flash_size:"Flash 大小",psram:"PSRAM",free_heap:"当前空闲堆",minimum_free_heap:"历史最小空闲堆",uptime:"运行时长",wifi_mode:"模式",wifi_connected:"已连接",wifi_ip:"IP",wifi_ap_ssid:"AP SSID",yes:"是",no:"否",enabled:"已启用",disabled:"未启用",note:"当前这个页面有意保持只读。现阶段作为开源 DIY 项目，暂不通过 Web UI 暴露固件升级功能。",back_home:"返回调谐器",back_wifi:"Wi-Fi 设置",lang_label:"EN"}
 };
 
 let curLang='en';
+let currentSystemState=null;
+
+function setText(id,value){
+document.getElementById(id).textContent=value===undefined||value===null||value===''?'--':String(value);
+}
+
+function formatBytes(bytes){
+const num=Number(bytes);
+if(!Number.isFinite(num)||num<=0)return'--';
+const units=['B','KiB','MiB','GiB'];
+let value=num;
+let unit=0;
+while(value>=1024&&unit<units.length-1){
+value/=1024;
+unit++;
+}
+const digits=value>=100||unit===0?0:value>=10?1:2;
+return value.toFixed(digits)+' '+units[unit];
+}
+
+function formatUptime(seconds){
+const total=Math.floor(Number(seconds));
+if(!Number.isFinite(total)||total<0)return'--';
+const days=Math.floor(total/86400);
+const hours=Math.floor(total%86400/3600);
+const minutes=Math.floor(total%3600/60);
+const secs=total%60;
+const parts=[];
+if(days)parts.push(days+'d');
+if(hours||parts.length)parts.push(hours+'h');
+if(minutes||parts.length)parts.push(minutes+'m');
+parts.push(secs+'s');
+return parts.join(' ');
+}
+
+function formatYesNo(value){
+return value?LANG[curLang].yes:LANG[curLang].no;
+}
+
+function formatPsram(enabled,sizeBytes){
+if(!enabled)return LANG[curLang].disabled;
+const size=formatBytes(sizeBytes);
+return size==='--'?LANG[curLang].enabled:LANG[curLang].enabled+' ('+size+')';
+}
+
+function renderSystem(data){
+currentSystemState=data;
+setText('version','v'+data.version+' ('+data.commit+'@'+data.branch+' '+data.date+')');
+setText('running',data.running_partition||'--');
+setText('boot',data.boot_partition||'--');
+setText('next',data.next_partition||'--');
+setText('chip_model',data.chip_model||'--');
+setText('chip_revision',data.chip_revision!==undefined?String(data.chip_revision):'--');
+setText('cpu_cores',data.cpu_cores!==undefined?String(data.cpu_cores):'--');
+setText('flash_size',formatBytes(data.flash_size_bytes));
+setText('psram',formatPsram(data.psram_enabled,data.psram_size_bytes));
+setText('free_heap',formatBytes(data.free_heap_bytes));
+setText('minimum_free_heap',formatBytes(data.minimum_free_heap_bytes));
+setText('uptime',formatUptime(data.uptime_seconds));
+setText('wifi_mode',data.wifi_mode||'--');
+setText('wifi_connected',data.wifi_connected!==undefined?formatYesNo(data.wifi_connected):'--');
+setText('wifi_ip',data.wifi_ip||'--');
+setText('wifi_ap_ssid',data.wifi_ap_active&&data.wifi_ap_ssid?data.wifi_ap_ssid:'--');
+}
 
 function applyLang(code){
 curLang=code;
@@ -57,6 +143,7 @@ document.getElementById('langbtn').textContent=t.lang_label;
 document.documentElement.lang=code==='zh'?'zh-CN':'en';
 document.title=t.title;
 localStorage.setItem('lang',code);
+if(currentSystemState)renderSystem(currentSystemState);
 }
 
 function toggleLang(){applyLang(curLang==='en'?'zh':'en')}
@@ -66,10 +153,7 @@ try{
 const r=await fetch('/api/system');
 if(!r.ok)throw new Error(r.statusText);
 const d=await r.json();
-document.getElementById('version').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
-document.getElementById('running').textContent=d.running_partition||'--';
-document.getElementById('boot').textContent=d.boot_partition||'--';
-document.getElementById('next').textContent=d.next_partition||'--';
+renderSystem(d);
 }catch(_e){}
 }
 

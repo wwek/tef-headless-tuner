@@ -14,6 +14,8 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_http_server
+        esp_psram
+        esp_timer
         app_update
         tef6686
         tuner_frontend

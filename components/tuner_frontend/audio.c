@@ -13,6 +13,8 @@ static const char *TAG = "audio";
 
 #define AUDIO_RING_BUF_SIZE (32 * 1024)
 #define AUDIO_FRAME_BYTES (((CONFIG_AUDIO_SAMPLE_RATE * 2 * (CONFIG_AUDIO_BITS_PER_SAMPLE / 8)) + 999) / 1000)
+#define AUDIO_RING_ITEM_COUNT (AUDIO_RING_BUF_SIZE / AUDIO_FRAME_BYTES)
+#define AUDIO_USB_PREROLL_BYTES (AUDIO_FRAME_BYTES * 8)
 #define AUDIO_CHANNEL_COUNT 2
 #define AUDIO_VOLUME_RANGE_MIN (-90 * 256)
 #define AUDIO_VOLUME_RANGE_MAX 0
@@ -26,6 +28,11 @@ static uint32_t s_sample_rate_hz;
 static uint8_t s_clock_valid = 1;
 static bool s_mute[AUDIO_CHANNEL_COUNT + 1];
 static int16_t s_volume[AUDIO_CHANNEL_COUNT + 1];
+static size_t s_ring_queued_bytes;
+static uint8_t s_usb_stage_buf[AUDIO_FRAME_BYTES];
+static size_t s_usb_stage_len;
+static size_t s_usb_stage_offset;
+static bool s_usb_preroll_done;
 
 #define MAX_AUDIO_CONSUMERS 4
 
@@ -194,16 +201,85 @@ static void audio_process_buffer(uint8_t *data, size_t len)
 static void audio_ring_reset(void)
 {
     if (!s_ring_buf) {
+        s_ring_queued_bytes = 0;
         return;
     }
 
     while (true) {
         size_t item_size = 0;
-        void *item = xRingbufferReceiveUpTo(s_ring_buf, &item_size, 0, AUDIO_RING_BUF_SIZE);
+        void *item = xRingbufferReceive(s_ring_buf, &item_size, 0);
         if (!item) {
             break;
         }
         vRingbufferReturnItem(s_ring_buf, item);
+    }
+
+    s_ring_queued_bytes = 0;
+}
+
+static void audio_usb_state_reset(void)
+{
+    s_usb_stage_len = 0;
+    s_usb_stage_offset = 0;
+    s_usb_preroll_done = false;
+}
+
+static size_t audio_ring_fill_bytes(void)
+{
+    return s_ring_queued_bytes;
+}
+
+static bool audio_load_usb_stage_buffer(void)
+{
+    size_t item_size = 0;
+    uint8_t *data = (uint8_t *)xRingbufferReceive(s_ring_buf, &item_size, 0);
+    if (!data || item_size == 0) {
+        return false;
+    }
+
+    if (item_size > sizeof(s_usb_stage_buf)) {
+        item_size = sizeof(s_usb_stage_buf);
+    }
+
+    memcpy(s_usb_stage_buf, data, item_size);
+    vRingbufferReturnItem(s_ring_buf, data);
+    if (s_ring_queued_bytes >= item_size) {
+        s_ring_queued_bytes -= item_size;
+    } else {
+        s_ring_queued_bytes = 0;
+    }
+
+    audio_process_buffer(s_usb_stage_buf, item_size);
+    s_usb_stage_len = item_size;
+    s_usb_stage_offset = 0;
+    return true;
+}
+
+static void audio_ring_push(const uint8_t *data, size_t len)
+{
+    if (!s_ring_buf || !data || len == 0) {
+        return;
+    }
+
+    BaseType_t wr = xRingbufferSend(s_ring_buf, data, len, 0);
+    if (wr == pdTRUE) {
+        s_ring_queued_bytes += len;
+        return;
+    }
+
+    size_t dropped_size = 0;
+    void *dropped = xRingbufferReceive(s_ring_buf, &dropped_size, 0);
+    if (dropped) {
+        vRingbufferReturnItem(s_ring_buf, dropped);
+        if (s_ring_queued_bytes >= dropped_size) {
+            s_ring_queued_bytes -= dropped_size;
+        } else {
+            s_ring_queued_bytes = 0;
+        }
+    }
+
+    if (xRingbufferSend(s_ring_buf, data, len, 0) == pdTRUE) {
+        s_ring_queued_bytes += len;
     }
 }
 
@@ -221,7 +297,7 @@ esp_err_t audio_init(const audio_config_t *config)
     i2s_data_bit_width_t width = audio_data_bit_width_from_config(config->bits_per_sample);
 
     // Create ring buffer for I2S -> USB audio pipeline
-    s_ring_buf = xRingbufferCreate(AUDIO_RING_BUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    s_ring_buf = xRingbufferCreateNoSplit(AUDIO_FRAME_BYTES, AUDIO_RING_ITEM_COUNT);
     if (!s_ring_buf) {
         ESP_LOGE(TAG, "Failed to create audio ring buffer");
         return ESP_ERR_NO_MEM;
@@ -267,6 +343,7 @@ esp_err_t audio_init(const audio_config_t *config)
     s_clock_valid = 1;
     memset(s_mute, 0, sizeof(s_mute));
     memset(s_volume, 0, sizeof(s_volume));
+    audio_usb_state_reset();
     s_sample_rate_range.wNumSubRanges = tu_htole16(1);
     s_sample_rate_range.subrange[0].bMin = (int32_t)config->sample_rate;
     s_sample_rate_range.subrange[0].bMax = (int32_t)config->sample_rate;
@@ -286,19 +363,38 @@ static void feed_usb_audio(void)
         return;
     }
     if (!tud_audio_mounted()) {
+        audio_usb_state_reset();
         return;
     }
 
-    size_t item_size = 0;
-    uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(s_ring_buf, &item_size, 0, AUDIO_FRAME_BYTES);
-    if (!data || item_size == 0) {
-        return;
+    if (!s_usb_preroll_done) {
+        if (audio_ring_fill_bytes() < AUDIO_USB_PREROLL_BYTES) {
+            return;
+        }
+        s_usb_preroll_done = true;
     }
 
-    audio_process_buffer(data, item_size);
-    (void)tud_audio_write(data, (uint16_t)item_size);
+    while (true) {
+        if (s_usb_stage_offset >= s_usb_stage_len) {
+            if (!audio_load_usb_stage_buffer()) {
+                break;
+            }
+        }
 
-    vRingbufferReturnItem(s_ring_buf, data);
+        size_t remaining = s_usb_stage_len - s_usb_stage_offset;
+        uint16_t written = tud_audio_write(s_usb_stage_buf + s_usb_stage_offset, (uint16_t)remaining);
+        if (written == 0) {
+            break;
+        }
+
+        s_usb_stage_offset += written;
+        if (s_usb_stage_offset < s_usb_stage_len) {
+            break;
+        }
+
+        s_usb_stage_len = 0;
+        s_usb_stage_offset = 0;
+    }
 #endif
 }
 
@@ -307,6 +403,8 @@ static void audio_task_fn(void *arg)
     ESP_LOGI(TAG, "Audio task started");
     uint8_t buf[AUDIO_FRAME_BYTES];
 
+    audio_ring_reset();
+    audio_usb_state_reset();
     i2s_channel_enable(s_rx_chan);
     s_running = true;
 
@@ -320,14 +418,7 @@ static void audio_task_fn(void *arg)
                 }
             }
 
-            BaseType_t wr = xRingbufferSend(s_ring_buf, buf, bytes_read, pdMS_TO_TICKS(10));
-            if (wr != pdTRUE) {
-                // Buffer overflow - drop oldest data
-                size_t dummy_size;
-                void *dummy = xRingbufferReceiveUpTo(s_ring_buf, &dummy_size, 0, bytes_read);
-                if (dummy) vRingbufferReturnItem(s_ring_buf, dummy);
-                xRingbufferSend(s_ring_buf, buf, bytes_read, 0);
-            }
+            audio_ring_push(buf, bytes_read);
         }
 
         // Try to feed USB if TinyUSB audio is ready
@@ -362,6 +453,7 @@ esp_err_t audio_stop(void)
     s_running = false;
     vTaskDelay(pdMS_TO_TICKS(200));
     audio_ring_reset();
+    audio_usb_state_reset();
 #if CFG_TUD_AUDIO
     (void)tud_audio_clear_ep_in_ff();
 #endif
@@ -529,6 +621,20 @@ bool tud_audio_set_req_itf_cb(uint8_t rhport, tusb_control_request_t const *requ
     return false;
 }
 
+bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *request)
+{
+    (void)rhport;
+
+    uint8_t alt_setting = TU_U16_LOW(tu_le16toh(request->wValue));
+    if (alt_setting != 0) {
+        audio_ring_reset();
+        audio_usb_state_reset();
+        (void)tud_audio_clear_ep_in_ff();
+    }
+
+    return true;
+}
+
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *request, uint8_t *buf)
 {
     (void)rhport;
@@ -581,6 +687,7 @@ bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const 
     (void)request;
 
     audio_ring_reset();
+    audio_usb_state_reset();
     (void)tud_audio_clear_ep_in_ff();
     return true;
 }

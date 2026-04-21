@@ -70,12 +70,10 @@ static const char *chip_model_name(esp_chip_model_t model)
         return "ESP32-P4";
     case CHIP_ESP32C61:
         return "ESP32-C61";
+#if defined(CHIP_ESP32C5)
     case CHIP_ESP32C5:
         return "ESP32-C5";
-    case CHIP_ESP32H21:
-        return "ESP32-H21";
-    case CHIP_ESP32H4:
-        return "ESP32-H4";
+#endif
     case CHIP_POSIX_LINUX:
         return "POSIX";
     default:

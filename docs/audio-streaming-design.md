@@ -73,6 +73,31 @@ A zero-copy reference counting approach was considered but rejected for this pro
 - The ring buffer approach has predictable memory usage and simple overflow behavior (drop oldest).
 - Reference counting adds atomic operation overhead and complex free-timing bugs that are hard to debug.
 
+### 3.4 Clock Domain Constraint
+
+This project has two independent timing sources:
+
+1. `TEF6686` drives `BCLK/WS` as the `I2S master`
+2. The `USB host` schedules isochronous transfers from its own `SOF` clock
+
+Even when both sides are nominally configured for the same sample rate, they are not guaranteed to produce and consume samples at exactly the same long-term average rate. A small ppm error is enough to slowly drain or fill the USB ring buffer.
+
+This is the main reason some community USB digital tuner builds are described as sounding worse than the analog path. The failure mode is usually not "digital audio is bad" and not "the MCU brand is bad". The failure mode is that the bridge between the tuner clock domain and the USB host clock domain is implemented with a coarse buffer hack instead of real synchronization.
+
+Design requirements for this repository:
+
+- The USB ring buffer absorbs short-term jitter and scheduling variance. It must not be the primary long-term clock compensation mechanism.
+- Normal steady-state playback must not depend on periodic PCM chunk drops or silence insertion.
+- The advertised UAC sample rate must match the actual tuner output configuration for the selected audio path.
+- If the tuner clock cannot be locked closely enough to the USB side, the design must add an explicit synchronization strategy such as UAC feedback or a controlled resampling stage.
+
+Anti-patterns to avoid:
+
+- Dropping a PCM block whenever the buffer gets too full
+- Inserting silence whenever the buffer gets too empty
+- Treating rare buffer recovery behavior as acceptable steady-state behavior
+- Assuming that matching nominal sample-rate numbers alone solves drift
+
 ## 4. Memory Layout
 
 ```
@@ -253,4 +278,6 @@ CONFIG_SPIRAM=y
 - [x] Client lifecycle management (connect/disconnect/cleanup)
 - [x] Browser AudioWorklet PCM player
 - [x] WiFi power save disabled
+- [ ] UAC clock-domain synchronization strategy verified on real hardware
+- [ ] Long-run USB audio capture shows no periodic underflow/overflow artifacts
 - [ ] Board-level verification (audio quality, latency, stability)
