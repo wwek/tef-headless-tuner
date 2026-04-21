@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "app_settings.h"
 #include "audio.h"
 #include "tuner_controller.h"
 #include "wifi_manager.h"
@@ -18,6 +19,7 @@
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include "cJSON.h"
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -34,6 +36,7 @@ extern const char html_system_end[]   asm("_binary_system_html_end");
 static httpd_handle_t s_server;
 
 static esp_err_t set_cors_headers(httpd_req_t *req);
+static void sse_broadcast(const char *event, const char *json);
 
 static const char *wifi_mode_name(wifi_mgr_mode_t mode)
 {
@@ -162,6 +165,212 @@ static sse_client_t s_sse_clients[MAX_SSE_CLIENTS];
 static QueueHandle_t s_sse_req_queue;
 static QueueHandle_t s_sse_msg_queue;
 static TaskHandle_t s_sse_worker_task;
+
+// --- Spectrum scan ---
+
+#define SPECTRUM_SCAN_STACK      4096
+#define SPECTRUM_SCAN_PRIO       4
+#define SPECTRUM_SETTLE_MS       20
+#define SPECTRUM_STEP_KHZ        100U
+#define SPECTRUM_BANDWIDTH_KHZ   56U
+#define SPECTRUM_OIRT_START_KHZ  64000U
+#define SPECTRUM_OIRT_END_KHZ    86000U
+#define SPECTRUM_FM_START_KHZ    86000U
+#define SPECTRUM_FM_END_KHZ      108000U
+
+typedef struct {
+    uint32_t scan_id;
+    uint32_t start_khz;
+    uint32_t end_khz;
+    uint32_t step_khz;
+    uint16_t bandwidth_khz;
+} spectrum_scan_req_t;
+
+static SemaphoreHandle_t s_spectrum_mutex;
+static TaskHandle_t s_spectrum_task;
+static bool s_spectrum_active;
+static uint32_t s_spectrum_scan_id;
+static volatile bool s_spectrum_cancel_requested;
+
+static size_t spectrum_count_points(uint32_t start_khz, uint32_t end_khz, uint32_t step_khz)
+{
+    if (step_khz == 0 || end_khz < start_khz) {
+        return 0;
+    }
+
+    return ((end_khz - start_khz) / step_khz) + 1U;
+}
+
+static void spectrum_set_active(bool active)
+{
+    if (!s_spectrum_mutex) {
+        s_spectrum_active = active;
+        return;
+    }
+
+    xSemaphoreTake(s_spectrum_mutex, portMAX_DELAY);
+    s_spectrum_active = active;
+    xSemaphoreGive(s_spectrum_mutex);
+}
+
+static bool spectrum_try_begin(uint32_t *scan_id_out)
+{
+    bool ok = false;
+
+    if (!s_spectrum_mutex) {
+        return false;
+    }
+
+    xSemaphoreTake(s_spectrum_mutex, portMAX_DELAY);
+    if (!s_spectrum_active) {
+        s_spectrum_active = true;
+        s_spectrum_scan_id++;
+        if (scan_id_out) {
+            *scan_id_out = s_spectrum_scan_id;
+        }
+        ok = true;
+    }
+    xSemaphoreGive(s_spectrum_mutex);
+
+    return ok;
+}
+
+static void spectrum_resolve_range(const tuner_state_t *state, uint32_t *start_khz, uint32_t *end_khz)
+{
+    if (state && state->active_band == TEF_BAND_FM &&
+        state->status.frequency >= SPECTRUM_OIRT_START_KHZ &&
+        state->status.frequency < SPECTRUM_OIRT_END_KHZ) {
+        *start_khz = SPECTRUM_OIRT_START_KHZ;
+        *end_khz = SPECTRUM_OIRT_END_KHZ;
+        return;
+    }
+
+    *start_khz = SPECTRUM_FM_START_KHZ;
+    *end_khz = SPECTRUM_FM_END_KHZ;
+}
+
+static void spectrum_broadcast_status(const char *state, const spectrum_scan_req_t *req)
+{
+    char json[192];
+    size_t total = spectrum_count_points(req->start_khz, req->end_khz, req->step_khz);
+
+    snprintf(json,
+             sizeof(json),
+             "{\"state\":\"%s\",\"scan_id\":%" PRIu32 ",\"start\":%" PRIu32 ","
+             "\"end\":%" PRIu32 ",\"step\":%" PRIu32 ",\"bw\":%u,\"total\":%u}",
+             state,
+             req->scan_id,
+             req->start_khz,
+             req->end_khz,
+             req->step_khz,
+             (unsigned)req->bandwidth_khz,
+             (unsigned)total);
+    sse_broadcast("spectrum_status", json);
+}
+
+static void spectrum_broadcast_point(const spectrum_scan_req_t *req,
+                                     size_t index,
+                                     uint32_t freq_khz,
+                                     int16_t level_tenth_db)
+{
+    char json[160];
+
+    snprintf(json,
+             sizeof(json),
+             "{\"scan_id\":%" PRIu32 ",\"index\":%u,\"freq\":%" PRIu32 ",\"level\":%.1f}",
+             req->scan_id,
+             (unsigned)index,
+             freq_khz,
+             level_tenth_db / 10.0f);
+    sse_broadcast("spectrum_point", json);
+}
+
+static void spectrum_scan_task(void *arg)
+{
+    spectrum_scan_req_t *req = (spectrum_scan_req_t *)arg;
+    tuner_state_t saved_state = tuner_controller_get_state();
+    tuner_xdr_settings_t saved_settings = {0};
+    esp_err_t err = ESP_OK;
+
+    tuner_controller_get_xdr_settings(&saved_settings);
+    spectrum_broadcast_status("running", req);
+
+    err = tuner_controller_set_scan_mute(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "spectrum scan mute failed: %s", esp_err_to_name(err));
+    }
+
+    if (err == ESP_OK && req->bandwidth_khz > 0 && saved_settings.fm_bandwidth_khz != req->bandwidth_khz) {
+        esp_err_t bw_err = tuner_controller_set_bandwidth_fm(req->bandwidth_khz);
+        if (bw_err != ESP_OK) {
+            ESP_LOGW(TAG, "spectrum scan bandwidth set failed: %s", esp_err_to_name(bw_err));
+        }
+    }
+
+    if (err == ESP_OK) {
+        size_t index = 0;
+
+        for (uint32_t freq_khz = req->start_khz;
+             freq_khz <= req->end_khz;
+             freq_khz += req->step_khz, index++) {
+            if (s_spectrum_cancel_requested) {
+                err = ESP_ERR_INVALID_STATE;
+                break;
+            }
+
+            int16_t level_tenth_db = -200;
+            esp_err_t tune_err = tuner_controller_tune_fm(freq_khz);
+
+            if (tune_err != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "spectrum tune failed at %" PRIu32 " kHz: %s",
+                         freq_khz,
+                         esp_err_to_name(tune_err));
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(SPECTRUM_SETTLE_MS));
+                if (s_spectrum_cancel_requested) {
+                    err = ESP_ERR_INVALID_STATE;
+                    break;
+                }
+                tuner_state_t state = tuner_controller_get_state();
+                level_tenth_db = state.quality.level;
+            }
+
+            spectrum_broadcast_point(req, index, freq_khz, level_tenth_db);
+
+            if (freq_khz > UINT32_MAX - req->step_khz) {
+                break;
+            }
+        }
+    }
+
+    if (saved_settings.fm_bandwidth_khz != req->bandwidth_khz) {
+        esp_err_t restore_bw_err = tuner_controller_set_bandwidth_fm(saved_settings.fm_bandwidth_khz);
+        if (restore_bw_err != ESP_OK) {
+            ESP_LOGW(TAG, "spectrum restore bandwidth failed: %s", esp_err_to_name(restore_bw_err));
+        }
+    }
+
+    if (saved_state.active_band == TEF_BAND_FM) {
+        esp_err_t restore_tune_err = tuner_controller_tune_fm(saved_state.status.frequency);
+        if (restore_tune_err != ESP_OK) {
+            ESP_LOGW(TAG, "spectrum restore tune failed: %s", esp_err_to_name(restore_tune_err));
+            err = restore_tune_err;
+        }
+    }
+
+    if (tuner_controller_set_scan_mute(false) != ESP_OK) {
+        ESP_LOGW(TAG, "spectrum unmute restore failed");
+    }
+
+    app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_WEB_SPECTRUM);
+    spectrum_broadcast_status(err == ESP_OK ? "complete" : "error", req);
+    spectrum_set_active(false);
+    s_spectrum_cancel_requested = false;
+    s_spectrum_task = NULL;
+    free(req);
+    vTaskDelete(NULL);
+}
 
 static void sse_remove_client(int idx)
 {
@@ -756,28 +965,28 @@ static esp_err_t h_post_tune(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "FM frequency out of range");
             return ESP_FAIL;
         }
-        err = tuner_controller_tune_fm(freq);
+        err = app_settings_tune_fm(freq);
     } else if (strcasecmp(band, "LW") == 0) {
         if (freq < 144U || freq > 519U) {
             cJSON_Delete(body);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "LW frequency out of range");
             return ESP_FAIL;
         }
-        err = tuner_controller_tune_am(freq);
+        err = app_settings_tune_am(freq);
     } else if (strcasecmp(band, "MW") == 0) {
         if (freq < 520U || freq > 1710U) {
             cJSON_Delete(body);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "MW frequency out of range");
             return ESP_FAIL;
         }
-        err = tuner_controller_tune_am(freq);
+        err = app_settings_tune_am(freq);
     } else if (strcasecmp(band, "SW") == 0) {
         if (freq < 1711U || freq > 27000U) {
             cJSON_Delete(body);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SW frequency out of range");
             return ESP_FAIL;
         }
-        err = tuner_controller_tune_am(freq);
+        err = app_settings_tune_am(freq);
     } else {
         cJSON_Delete(body);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unsupported band");
@@ -839,7 +1048,7 @@ static esp_err_t h_post_seek(httpd_req_t *req)
     }
 
     tuner_controller_abort_seek();
-    err = tuner_controller_start_seek(up, is_am);
+    err = app_settings_start_seek(up, is_am);
     if (err != ESP_OK) {
         cJSON_Delete(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "seek failed");
@@ -876,9 +1085,12 @@ static esp_err_t h_post_volume(httpd_req_t *req)
     int vol = jvol->valueint;
     if (vol < 0) vol = 0;
     if (vol > 30) vol = 30;
-    tuner_controller_set_volume((uint8_t)vol);
-
+    esp_err_t err = app_settings_set_volume((uint8_t)vol);
     cJSON_Delete(body);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set volume failed");
+        return ESP_FAIL;
+    }
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -898,11 +1110,83 @@ static esp_err_t h_post_mute(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    tuner_controller_set_mute(cJSON_IsTrue(jmute));
-
+    esp_err_t err = app_settings_set_mute(cJSON_IsTrue(jmute));
     cJSON_Delete(body);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set mute failed");
+        return ESP_FAIL;
+    }
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
+}
+
+static esp_err_t h_post_spectrum_scan(httpd_req_t *req)
+{
+    tuner_state_t state = tuner_controller_get_state();
+
+    if (state.active_band != TEF_BAND_FM) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "spectrum is only available in FM band");
+        return ESP_FAIL;
+    }
+    if (state.seeking) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "seek is active");
+        return ESP_FAIL;
+    }
+    if (app_settings_begin_busy(APP_SETTINGS_BUSY_OWNER_WEB_SPECTRUM) != ESP_OK) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "tuner busy");
+        return ESP_FAIL;
+    }
+
+    uint32_t scan_id = 0;
+    if (!spectrum_try_begin(&scan_id)) {
+        app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_WEB_SPECTRUM);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "spectrum scan busy");
+        return ESP_FAIL;
+    }
+
+    spectrum_scan_req_t *scan = calloc(1, sizeof(*scan));
+    if (!scan) {
+        spectrum_set_active(false);
+        app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_WEB_SPECTRUM);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    scan->scan_id = scan_id;
+    scan->step_khz = SPECTRUM_STEP_KHZ;
+    scan->bandwidth_khz = SPECTRUM_BANDWIDTH_KHZ;
+    spectrum_resolve_range(&state, &scan->start_khz, &scan->end_khz);
+
+    if (xTaskCreate(spectrum_scan_task,
+                    "web_spectrum",
+                    SPECTRUM_SCAN_STACK,
+                    scan,
+                    SPECTRUM_SCAN_PRIO,
+                    &s_spectrum_task) != pdPASS) {
+        free(scan);
+        spectrum_set_active(false);
+        app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_WEB_SPECTRUM);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan task create failed");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "scan_id", scan->scan_id);
+    cJSON_AddNumberToObject(root, "start", scan->start_khz);
+    cJSON_AddNumberToObject(root, "end", scan->end_khz);
+    cJSON_AddNumberToObject(root, "step", scan->step_khz);
+    cJSON_AddNumberToObject(root, "bw", scan->bandwidth_khz);
+    cJSON_AddNumberToObject(root,
+                            "total",
+                            (double)spectrum_count_points(scan->start_khz, scan->end_khz, scan->step_khz));
+    esp_err_t err = send_json_response(req, root);
+    cJSON_Delete(root);
+    return err;
 }
 
 static esp_err_t h_post_wifi(httpd_req_t *req)
@@ -1010,6 +1294,7 @@ static const uri_entry_t s_uris[] = {
     { "/api/seekstop",  HTTP_POST, h_post_seekstop },
     { "/api/volume",    HTTP_POST, h_post_volume   },
     { "/api/mute",      HTTP_POST, h_post_mute     },
+    { "/api/spectrum/scan", HTTP_POST, h_post_spectrum_scan },
     { "/api/quality",   HTTP_GET,  h_get_quality   },
     { "/api/rds",       HTTP_GET,  h_get_rds       },
     { "/api/events",    HTTP_GET,  h_sse_events    },
@@ -1024,7 +1309,7 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size        = 8192;
-    config.max_uri_handlers  = 20;
+    config.max_uri_handlers  = 24;
     config.max_resp_headers  = 8;
     config.uri_match_fn      = httpd_uri_match_wildcard;
     config.close_fn          = http_session_close_cb;
@@ -1069,6 +1354,23 @@ esp_err_t web_server_start(void)
         ESP_LOGE(TAG, "failed to create SSE worker task");
         return ESP_ERR_NO_MEM;
     }
+
+    s_spectrum_mutex = xSemaphoreCreateMutex();
+    if (!s_spectrum_mutex) {
+        vTaskDelete(s_sse_worker_task);
+        s_sse_worker_task = NULL;
+        vQueueDelete(s_sse_req_queue);
+        s_sse_req_queue = NULL;
+        vQueueDelete(s_sse_msg_queue);
+        s_sse_msg_queue = NULL;
+        httpd_stop(s_server);
+        s_server = NULL;
+        ESP_LOGE(TAG, "failed to create spectrum mutex");
+        return ESP_ERR_NO_MEM;
+    }
+    s_spectrum_active = false;
+    s_spectrum_task = NULL;
+    s_spectrum_cancel_requested = false;
 
     for (size_t i = 0; i < NUM_URIS; i++) {
         httpd_uri_t uri = {
@@ -1125,6 +1427,13 @@ void web_server_stop(void)
 
     tuner_controller_unregister_cb(status_cb);
     audio_unregister_data_cb(ws_audio_data_cb);
+    spectrum_set_active(false);
+    s_spectrum_cancel_requested = true;
+    if (s_spectrum_task) {
+        while (s_spectrum_task != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
 
     // Stop WS audio sender task
     s_ws_audio_running = false;
@@ -1174,6 +1483,11 @@ void web_server_stop(void)
         vQueueDelete(s_sse_msg_queue);
         s_sse_msg_queue = NULL;
     }
+    if (s_spectrum_mutex) {
+        vSemaphoreDelete(s_spectrum_mutex);
+        s_spectrum_mutex = NULL;
+    }
+    s_spectrum_task = NULL;
 
     httpd_stop(s_server);
     s_server = NULL;

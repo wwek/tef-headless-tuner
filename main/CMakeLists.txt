@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "app_settings.c"
         "usb_cdc.c"
         "usb_descriptors.c"
         "cmd_handler.c"

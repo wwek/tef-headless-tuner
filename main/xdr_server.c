@@ -1,3 +1,4 @@
+#include "app_settings.h"
 #include "xdr_server.h"
 #include "tuner_controller.h"
 #include "esp_log.h"
@@ -634,6 +635,7 @@ static void xdr_scan_task(void *arg)
         (void)tuner_controller_tune_fm(saved_state.status.frequency);
     }
     (void)tuner_controller_set_scan_mute(false);
+    app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_XDR_SCAN);
 
     scan_finish();
     vTaskDelete(NULL);
@@ -910,7 +912,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (agc < 0 || agc > 3) {
             break;
         }
-        if (tuner_controller_set_agc_index((uint8_t)agc) == ESP_OK) {
+        if (app_settings_set_agc_index((uint8_t)agc) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "A%d\n", agc);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -929,7 +931,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             audio_mode = TUNER_XDR_AUDIO_MODE_MPX;
         }
 
-        if (tuner_controller_set_xdr_audio_mode(audio_mode) == ESP_OK) {
+        if (app_settings_set_xdr_audio_mode(audio_mode) == ESP_OK) {
             char resp[8];
             int value = mode > 1 ? 2 : mode;
             int len = snprintf(resp, sizeof(resp), "B%d\n", value);
@@ -950,9 +952,9 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         }
 
         if (freq >= 64000 && freq <= 108000) {
-            err = tuner_controller_tune_fm((uint32_t)freq);
+            err = app_settings_tune_fm((uint32_t)freq);
         } else if (freq >= 144 && freq <= 27000) {
-            err = tuner_controller_tune_am((uint32_t)freq);
+            err = app_settings_tune_am((uint32_t)freq);
         } else {
             break;
         }
@@ -981,9 +983,9 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         esp_err_t err;
 
         if (mode == 0) {
-            err = tuner_controller_switch_band(TEF_BAND_FM, &applied_freq);
+            err = app_settings_switch_band(TEF_BAND_FM, &applied_freq);
         } else if (mode == 1) {
-            err = tuner_controller_switch_band(s_last_am_band, &applied_freq);
+            err = app_settings_switch_band(s_last_am_band, &applied_freq);
         } else {
             break;
         }
@@ -1000,7 +1002,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         uint8_t scaled;
 
         if (volume == 0) {
-            if (tuner_controller_set_mute(true) == ESP_OK) {
+            if (app_settings_set_mute(true) == ESP_OK) {
                 (void)queue_client_str(c, "Y0\n");
             }
             break;
@@ -1020,8 +1022,8 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             scaled = 30;
         }
 
-        if (tuner_controller_set_mute(false) == ESP_OK
-            && tuner_controller_set_volume(scaled) == ESP_OK) {
+        if (app_settings_set_mute(false) == ESP_OK
+            && app_settings_set_volume(scaled) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "Y%d\n", volume);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1034,7 +1036,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         if (val == 0) deemp = 50;
         else if (val == 1) deemp = 75;
         else deemp = 0;
-        if (tuner_controller_set_deemphasis(deemp) == ESP_OK) {
+        if (app_settings_set_deemphasis(deemp) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "D%d\n", val);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1049,7 +1051,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             break;
         }
 
-        if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
+        if (app_settings_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "F%d\n", index);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1077,7 +1079,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             break;
         }
 
-        if (tuner_controller_set_xdr_eq(ims_enabled, eq_enabled) == ESP_OK) {
+        if (app_settings_set_xdr_eq(ims_enabled, eq_enabled) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "G%02d\n", value);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1099,7 +1101,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         }
         xSemaphoreGive(s_state_mutex);
 
-        err = tuner_controller_set_auto_squelch(enabled);
+        err = app_settings_set_auto_squelch(enabled);
         if (err == ESP_OK) {
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             s_xdr_runtime.autosquelch_enabled = enabled;
@@ -1185,7 +1187,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             bandwidth_khz = (uint16_t)bandwidth;
         }
 
-        if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
+        if (app_settings_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
             char resp[16];
             int len = snprintf(resp, sizeof(resp), "W%d\n", bandwidth);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1197,7 +1199,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         esp_err_t err;
         int16_t squelch = (int16_t)value;
 
-        err = tuner_controller_set_squelch(squelch);
+        err = app_settings_set_squelch(squelch);
         if (err == ESP_OK) {
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             s_xdr_runtime.squelch = squelch;
@@ -1232,7 +1234,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         case 'f': {
             uint16_t bandwidth_khz = bandwidth_from_filter_code(atoi(arg + 1));
             if (bandwidth_khz != UINT16_MAX) {
-                if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
+                if (app_settings_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
                     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                     s_xdr_runtime.scanner_filter = atoi(arg + 1);
                     s_xdr_runtime.scanner_bandwidth_khz = bandwidth_khz;
@@ -1244,7 +1246,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         case 'w': {
             uint32_t bandwidth_hz = (uint32_t)strtoul(arg + 1, NULL, 10);
             uint16_t bandwidth_khz = (uint16_t)(bandwidth_hz / 1000U);
-            if (tuner_controller_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
+            if (app_settings_set_bandwidth_fm(bandwidth_khz) == ESP_OK) {
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                 s_xdr_runtime.scanner_bandwidth_khz = bandwidth_khz;
                 xSemaphoreGive(s_state_mutex);
@@ -1252,6 +1254,10 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             break;
         }
         case '\0':
+            if (app_settings_begin_busy(APP_SETTINGS_BUSY_OWNER_XDR_SCAN) != ESP_OK) {
+                (void)queue_client_str(c, "E_BUSY\n");
+                break;
+            }
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             if (!s_scan_state.active) {
                 s_scan_state.active = true;
@@ -1264,11 +1270,13 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
                 s_scan_state.filter = s_xdr_runtime.scanner_filter;
                 xSemaphoreGive(s_state_mutex);
                 if (xTaskCreate(xdr_scan_task, "xdr_scan", 4096, NULL, XDR_TASK_PRIO, &s_scan_state.task) != pdPASS) {
+                    app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_XDR_SCAN);
                     scan_finish();
                     (void)queue_client_str(c, "E_SCAN\n");
                 }
             } else {
                 xSemaphoreGive(s_state_mutex);
+                app_settings_end_busy(APP_SETTINGS_BUSY_OWNER_XDR_SCAN);
                 (void)queue_client_str(c, "E_BUSY\n");
             }
             break;
@@ -1284,7 +1292,7 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
             break;
         }
 
-        if (tuner_controller_set_antenna((uint8_t)antenna) == ESP_OK) {
+        if (app_settings_set_antenna((uint8_t)antenna) == ESP_OK) {
             char resp[8];
             int len = snprintf(resp, sizeof(resp), "Z%d\n", antenna);
             (void)queue_client_frame(c, resp, (size_t)len);
@@ -1296,12 +1304,12 @@ static void handle_xdr_command(xdr_client_t *c, const char *line)
         bool am_mode = band_mode_is_am(tuner_controller_get_state().active_band);
         tuner_controller_abort_seek();
         if (dir == 1) {
-            if (tuner_controller_start_seek(false, am_mode) == ESP_OK) {
+            if (app_settings_start_seek(false, am_mode) == ESP_OK) {
                 c->last_seeking = true;
                 (void)queue_client_str(c, "C1\n");
             }
         } else if (dir == 2) {
-            if (tuner_controller_start_seek(true, am_mode) == ESP_OK) {
+            if (app_settings_start_seek(true, am_mode) == ESP_OK) {
                 c->last_seeking = true;
                 (void)queue_client_str(c, "C2\n");
             }

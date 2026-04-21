@@ -1,4 +1,5 @@
 #include "tef6686.h"
+#include "app_settings.h"
 #include "usb_cdc.h"
 #include "usb_descriptors.h"
 #include "audio.h"
@@ -61,6 +62,7 @@ void app_main(void)
 
     // Initialize TEF6686 via I2C
     esp_err_t err;
+    bool tef_ready = false;
     tef_config_t tef_cfg = {
         .i2c_port = CONFIG_TEF_I2C_PORT,
         .sda_pin = CONFIG_TEF_I2C_SDA_PIN,
@@ -73,6 +75,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TEF6686 init failed: %s", esp_err_to_name(err));
     } else {
+        tef_ready = true;
         tef6686_set_volume(CONFIG_TUNER_DEFAULT_VOLUME);
         tef6686_set_rds(true);
         tef6686_set_deemphasis(50);
@@ -147,6 +150,16 @@ void app_main(void)
                  wifi_mode_name(wifi_manager_get_mode()),
                  CONFIG_TEF_I2C_SDA_PIN,
                  CONFIG_TEF_I2C_SCL_PIN);
+    }
+
+    err = app_settings_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "App settings init failed: %s", esp_err_to_name(err));
+    } else if (tef_ready) {
+        err = app_settings_apply();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "App settings apply failed: %s", esp_err_to_name(err));
+        }
     }
 
     // Start web server and XDR-GTK TCP server

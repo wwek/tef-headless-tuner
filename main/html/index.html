@@ -58,6 +58,20 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 .preset-item .preset-freq{font-family:'Courier New',monospace;flex:1;font-size:.95em}
 .preset-item .preset-band{font-size:.75em;color:#888;min-width:28px}
 .preset-empty{color:#555;text-align:center;font-size:.85em;padding:10px 0}
+.hidden{display:none!important}
+.spectrum-card{padding:12px}
+.spectrum-meta{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.spectrum-title{font-size:1em;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#c8f17b}
+.spectrum-status{font-size:.78em;color:#9fb3c8;min-height:1.2em;font-family:'Courier New',monospace}
+.spectrum-wrap{position:relative;overflow:hidden;border-radius:10px;border:1px solid rgba(136,216,79,.3);background:
+radial-gradient(circle at top,#2b3547 0%,#161c26 35%,#0d1219 100%);
+box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}
+.spectrum-wrap.active{border-color:#88d84f;box-shadow:0 0 0 1px rgba(136,216,79,.14),inset 0 0 0 1px rgba(255,255,255,.03)}
+.spectrum-toolbar{position:absolute;top:10px;right:10px;display:flex;gap:6px;z-index:2}
+.spectrum-tool{width:34px;height:34px;min-width:34px;padding:0;border-radius:8px;border:1px solid rgba(136,216,79,.24);background:rgba(16,24,12,.78);backdrop-filter:blur(6px);font-size:.82em;font-weight:700;color:#bce96b}
+.spectrum-tool:hover{background:#26391d}
+.spectrum-tool.active{background:#88d84f;color:#071006;border-color:#88d84f}
+.spectrum-wrap canvas{width:100%;height:228px;display:block;cursor:crosshair}
 </style>
 </head>
 <body>
@@ -103,6 +117,21 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 </div>
 </div>
 
+<div class="card hidden spectrum-card" id="spectrumcard">
+<div class="spectrum-meta">
+<span class="spectrum-title" data-i18n="spectrum">Spectrum</span>
+<div class="spectrum-status" id="spectrumstatus"></div>
+</div>
+<div class="spectrum-wrap" id="spectrumwrap">
+<div class="spectrum-toolbar">
+<button class="btn spectrum-tool" id="spectrumautobtn" type="button" onclick="toggleSpectrumAuto()">A</button>
+<button class="btn spectrum-tool" id="spectrumholdbtn" type="button" onclick="toggleSpectrumHold()">H</button>
+<button class="btn spectrum-tool" id="spectrumbtn" type="button" onclick="scanSpectrum()">R</button>
+</div>
+<canvas id="spectrumcanvas"></canvas>
+</div>
+</div>
+
 <div class="card" id="rdscard">
 <div class="rds-ps empty" id="rdsps">--------</div>
 <div class="rds-rt" id="rdsrt"></div>
@@ -144,10 +173,12 @@ input[type=number],select{background:#0f3460;color:#eee;border:1px solid #333;bo
 let curFreq=0,curBand='FM',seeking=false,muted=false,tuned=false,stereo=false,curBw=0;
 let repeatTimer=null;
 let sse=null;
+let spectrum={active:false,status:'idle',scanId:0,start:0,end:0,step:100,total:0,points:[],holdPoints:[],drawReq:0,hoverIndex:-1,autoScale:true,hold:false};
+const SPECTRUM_KEY='tef_spectrum_v2';
 
 const LANG={
-en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",audio_play:"Listen",audio_stop:"Stop Audio",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies"},
-zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",audio_play:"收听",audio_stop:"停止收听",wifi_settings:"Wi-Fi 设置",system_settings:"系统",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率"}
+en:{title:"TEF6686 Tuner",step_dn:"- Step",step_up:"+ Step",tune:"Tune",seek_dn:"Seek DN",seek_up:"Seek UP",stop:"Stop",vol:"Vol",mute:"Mute",unmute:"Unmute",audio_play:"Listen",audio_stop:"Stop Audio",wifi_settings:"Wi-Fi Settings",system_settings:"System",lang_label:"中文",no_signal:"No Signal",stereo:"Stereo",mono:"Mono",presets:"Presets",save_preset:"Save",empty_presets:"No saved frequencies",spectrum:"Spectrum",scan_spectrum:"Rescan",spectrum_hint:"Run a scan to populate the graph",spectrum_ready:"Hover to inspect, tap to tune",spectrum_busy:"Spectrum scan in progress",spectrum_scanning:"Scanning",spectrum_error:"Spectrum scan failed",auto_scale:"Auto scale",hold_peaks:"Hold peaks"},
+zh:{title:"TEF6686 调谐器",step_dn:"- 步进",step_up:"+ 步进",tune:"调谐",seek_dn:"向下搜台",seek_up:"向上搜台",stop:"停止",vol:"音量",mute:"静音",unmute:"取消静音",audio_play:"收听",audio_stop:"停止收听",wifi_settings:"Wi-Fi 设置",system_settings:"系统",lang_label:"EN",no_signal:"无信号",stereo:"立体声",mono:"单声道",presets:"收藏频率",save_preset:"保存",empty_presets:"暂无收藏频率",spectrum:"频谱",scan_spectrum:"重扫",spectrum_hint:"先扫描后显示频谱",spectrum_ready:"悬停查看，点击调谐",spectrum_busy:"频谱扫描进行中",spectrum_scanning:"正在扫描",spectrum_error:"频谱扫描失败",auto_scale:"自动标尺",hold_peaks:"峰值保持"}
 };
 
 let curLang='en';
@@ -166,6 +197,8 @@ localStorage.setItem('lang',code);
 updateMuteBtn();
 updateFreqDisplay();
 renderPresets();
+updateSpectrumUi();
+requestSpectrumRender();
 }
 
 function toggleLang(){
@@ -189,9 +222,480 @@ return'#2ecc71';
 async function api(path,body){
 await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 }
-function tune(f,b){api('/api/tune',{freq:f,band:b})}
+function tune(f,b){
+if(spectrum.active){setSpectrumStatus('busy');return;}
+api('/api/tune',{freq:f,band:b})
+}
 function seekStop(){api('/api/seekstop',{})}
 function setVolume(v){document.getElementById('volv').textContent=v;api('/api/volume',{volume:+v})}
+
+function loadSpectrum(){
+try{
+const saved=JSON.parse(localStorage.getItem(SPECTRUM_KEY)||'null');
+if(!saved)return;
+spectrum.autoScale=saved.autoScale!==false;
+spectrum.hold=!!saved.hold;
+spectrum.start=saved.start||0;
+spectrum.end=saved.end||0;
+spectrum.step=saved.step||100;
+spectrum.total=saved.total||0;
+spectrum.points=Array.isArray(saved.points)?saved.points.map(p=>Array.isArray(p)?{freq:p[0],level:p[1]}:null):[];
+spectrum.holdPoints=Array.isArray(saved.holdPoints)?saved.holdPoints.map(p=>Array.isArray(p)?{freq:p[0],level:p[1]}:null):[];
+if(spectrum.points.some(Boolean))spectrum.status='ready';
+}catch(e){}
+}
+
+function storeSpectrum(){
+localStorage.setItem(SPECTRUM_KEY,JSON.stringify({
+autoScale:spectrum.autoScale,
+hold:spectrum.hold,
+start:spectrum.start,
+end:spectrum.end,
+step:spectrum.step,
+total:spectrum.total,
+points:spectrum.points.map(p=>p?[p.freq,p.level]:null),
+holdPoints:spectrum.holdPoints.map(p=>p?[p.freq,p.level]:null)
+}));
+}
+
+function spectrumRangeText(){
+if(!spectrum.start||!spectrum.end)return'';
+return fmtFreq(spectrum.start,'FM')+'-'+fmtFreq(spectrum.end,'FM')+' MHz';
+}
+
+function spectrumPointFrom(arr,idx){
+return Array.isArray(arr)&&idx>=0&&idx<arr.length?arr[idx]:null;
+}
+
+function spectrumPoint(idx){
+return spectrumPointFrom(spectrum.points,idx);
+}
+
+function findNearestSpectrumIndex(rawIdx){
+const len=spectrum.points.length;
+if(!len)return-1;
+let idx=Math.max(0,Math.min(len-1,rawIdx));
+if(spectrum.points[idx])return idx;
+for(let d=1;d<len;d++){
+const left=idx-d,right=idx+d;
+if(left>=0&&spectrum.points[left])return left;
+if(right<len&&spectrum.points[right])return right;
+}
+return-1;
+}
+
+function spectrumIndexFromClientX(clientX){
+if(!spectrum.start||!spectrum.end)return-1;
+const canvas=document.getElementById('spectrumcanvas');
+const rect=canvas.getBoundingClientRect();
+const left=42,right=Math.max(43,rect.width-16);
+const inner=Math.max(1,right-left);
+const x=Math.max(left,Math.min(right,clientX-rect.left));
+const pct=(x-left)/inner;
+const freq=spectrum.start+pct*(spectrum.end-spectrum.start);
+const raw=Math.round((freq-spectrum.start)/Math.max(1,spectrum.step));
+return findNearestSpectrumIndex(raw);
+}
+
+function spectrumTickStep(){
+const span=(Math.max(spectrum.end,86000)-Math.min(spectrum.start,86000))/1000;
+if(span<=12)return 1000;
+if(span<=26)return 2000;
+return 5000;
+}
+
+function spectrumScale(){
+const points=spectrum.points.filter(Boolean);
+const holds=spectrum.hold?spectrum.holdPoints.filter(Boolean):[];
+const levels=points.concat(holds).map(p=>p.level);
+if(!levels.length)return{min:0,max:60};
+if(!spectrum.autoScale){
+const top=Math.max(60,Math.ceil((Math.max.apply(null,levels)+2)/5)*5);
+return{min:0,max:top};
+}
+let min=Math.floor((Math.min.apply(null,levels)-2)/4)*4;
+let max=Math.ceil((Math.max.apply(null,levels)+2)/4)*4;
+if(max-min<24){
+const mid=(max+min)/2;
+min=Math.floor(mid-12);
+max=Math.ceil(mid+12);
+}
+return{min,max};
+}
+
+function spectrumResolveTunePoint(idx){
+let best=spectrumPoint(idx);
+if(!best)return null;
+for(let i=Math.max(0,idx-2);i<=Math.min(spectrum.points.length-1,idx+2);i++){
+const point=spectrumPoint(i);
+if(point&&point.level>best.level+1.2)best=point;
+}
+return best;
+}
+
+function mergeHoldSpectrum(){
+if(!spectrum.points.some(Boolean))return;
+const first=spectrum.points.find(Boolean);
+const last=[...spectrum.points].reverse().find(Boolean);
+const holdFirst=spectrum.holdPoints.find(Boolean);
+const holdLast=[...spectrum.holdPoints].reverse().find(Boolean);
+const sameLayout=spectrum.holdPoints.length===spectrum.points.length
+&&holdFirst&&last&&holdLast&&first
+&&holdFirst.freq===first.freq
+&&holdLast.freq===last.freq;
+if(!sameLayout){
+spectrum.holdPoints=spectrum.points.map(p=>p?{freq:p.freq,level:p.level}:null);
+return;
+}
+spectrum.points.forEach((p,i)=>{
+if(!p)return;
+const hold=spectrum.holdPoints[i];
+if(!hold||p.level>hold.level)spectrum.holdPoints[i]={freq:p.freq,level:p.level};
+});
+}
+
+function setSpectrumStatus(status){
+spectrum.status=status;
+if(status!=='running')spectrum.hoverIndex=-1;
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function toggleSpectrumAuto(){
+spectrum.autoScale=!spectrum.autoScale;
+storeSpectrum();
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function toggleSpectrumHold(){
+spectrum.hold=!spectrum.hold;
+storeSpectrum();
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function updateSpectrumUi(){
+const t=LANG[curLang]||LANG.en;
+const card=document.getElementById('spectrumcard');
+const btn=document.getElementById('spectrumbtn');
+const autoBtn=document.getElementById('spectrumautobtn');
+const holdBtn=document.getElementById('spectrumholdbtn');
+const wrap=document.getElementById('spectrumwrap');
+const hover=spectrumPoint(spectrum.hoverIndex);
+card.classList.toggle('hidden',curBand!=='FM');
+btn.disabled=spectrum.active||curBand!=='FM';
+btn.textContent=spectrum.active?'...':'R';
+btn.title=t.scan_spectrum;
+autoBtn.title=t.auto_scale;
+holdBtn.title=t.hold_peaks;
+btn.classList.toggle('active',spectrum.active);
+autoBtn.classList.toggle('active',spectrum.autoScale);
+holdBtn.classList.toggle('active',spectrum.hold);
+wrap.classList.toggle('active',spectrum.active);
+let text=spectrumRangeText();
+if(hover&&!spectrum.active){
+text=fmtFreq(hover.freq,'FM')+' MHz · '+hover.level.toFixed(1)+' dBf';
+}else if(spectrum.active){
+const done=spectrum.points.filter(Boolean).length;
+const pct=spectrum.total?Math.max(1,Math.round(done*100/spectrum.total)):0;
+text+=(text?' · ':'')+t.spectrum_scanning+' '+pct+'%';
+}else if(spectrum.status==='error'){
+text+=(text?' · ':'')+t.spectrum_error;
+}else if(spectrum.status==='busy'){
+text+=(text?' · ':'')+t.spectrum_busy;
+}else if(spectrum.points.some(Boolean)){
+text+=(text?' · ':'')+t.spectrum_ready;
+}else{
+text=t.spectrum_hint;
+}
+document.getElementById('spectrumstatus').textContent=text;
+}
+
+function requestSpectrumRender(){
+if(spectrum.drawReq)return;
+spectrum.drawReq=requestAnimationFrame(()=>{
+spectrum.drawReq=0;
+drawSpectrum();
+});
+}
+
+function drawSpectrum(){
+const canvas=document.getElementById('spectrumcanvas');
+if(!canvas)return;
+const rect=canvas.getBoundingClientRect();
+if(!rect.width||!rect.height)return;
+const dpr=window.devicePixelRatio||1;
+const width=Math.max(1,Math.round(rect.width));
+const height=Math.max(1,Math.round(rect.height));
+if(canvas.width!==width*dpr||canvas.height!==height*dpr){
+canvas.width=width*dpr;
+canvas.height=height*dpr;
+}
+const ctx=canvas.getContext('2d');
+ctx.setTransform(dpr,0,0,dpr,0,0);
+ctx.clearRect(0,0,width,height);
+
+const left=42,right=width-16,top=16,bottom=height-28;
+const innerW=Math.max(1,right-left);
+const innerH=Math.max(1,bottom-top);
+ctx.fillStyle='#10161f';
+ctx.fillRect(0,0,width,height);
+
+const points=spectrum.points.filter(Boolean);
+const holdPoints=spectrum.hold?spectrum.holdPoints.filter(Boolean):[];
+if(!points.length){
+ctx.fillStyle='#8aa0b4';
+ctx.font='12px system-ui';
+ctx.textAlign='center';
+ctx.fillText((LANG[curLang]||LANG.en).spectrum_hint,width/2,height/2);
+return;
+}
+
+const scale=spectrumScale();
+const xForFreq=f=>left+((f-spectrum.start)/Math.max(1,spectrum.end-spectrum.start))*innerW;
+const yForLevel=l=>bottom-((l-scale.min)/Math.max(1,scale.max-scale.min))*innerH;
+const tickStep=spectrumTickStep();
+const startTick=Math.ceil(spectrum.start/tickStep)*tickStep;
+const gridColor='rgba(219,231,255,.18)';
+const labelColor='#8bd64e';
+const axisColor='rgba(88,126,164,.45)';
+const strokeGradient=ctx.createLinearGradient(0,bottom,0,top);
+strokeGradient.addColorStop(0,'#0048ff');
+strokeGradient.addColorStop(0.35,'#1dde52');
+strokeGradient.addColorStop(0.7,'#d6de00');
+strokeGradient.addColorStop(1,'#ff2d00');
+const fillGradient=ctx.createLinearGradient(0,bottom,0,top);
+fillGradient.addColorStop(0,'rgba(0,72,255,.50)');
+fillGradient.addColorStop(0.35,'rgba(29,222,82,.34)');
+fillGradient.addColorStop(0.7,'rgba(214,222,0,.20)');
+fillGradient.addColorStop(1,'rgba(255,45,0,.12)');
+
+ctx.setLineDash([2,3]);
+ctx.strokeStyle=gridColor;
+ctx.lineWidth=1;
+for(let i=0;i<=5;i++){
+const value=scale.min+((scale.max-scale.min)/5)*i;
+const y=yForLevel(value);
+ctx.beginPath();
+ctx.moveTo(left,y);
+ctx.lineTo(right,y);
+ctx.stroke();
+ctx.setLineDash([]);
+ctx.fillStyle=labelColor;
+ctx.font='11px Courier New';
+ctx.textAlign='right';
+ctx.fillText(Math.round(value).toString(),left-8,y+4);
+ctx.setLineDash([2,3]);
+}
+for(let freq=startTick;freq<=spectrum.end;freq+=tickStep){
+const x=xForFreq(freq);
+ctx.beginPath();
+ctx.moveTo(x,top);
+ctx.lineTo(x,bottom);
+ctx.stroke();
+ctx.setLineDash([]);
+ctx.fillStyle=labelColor;
+ctx.font='11px Courier New';
+ctx.textAlign='center';
+ctx.fillText(fmtFreq(freq,'FM'),x,bottom+16);
+ctx.setLineDash([2,3]);
+}
+ctx.setLineDash([]);
+ctx.strokeStyle=axisColor;
+ctx.beginPath();
+ctx.moveTo(left,bottom);
+ctx.lineTo(right,bottom);
+ctx.stroke();
+
+function drawLine(series,color,widthPx){
+let first=true;
+ctx.beginPath();
+series.forEach(point=>{
+const x=xForFreq(point.freq);
+const y=yForLevel(point.level);
+if(first){ctx.moveTo(x,y);first=false;}
+else ctx.lineTo(x,y);
+});
+ctx.strokeStyle=color;
+ctx.lineWidth=widthPx;
+ctx.lineJoin='round';
+ctx.lineCap='round';
+ctx.stroke();
+}
+
+if(holdPoints.length){
+drawLine(holdPoints,'rgba(255,176,76,.75)',1.2);
+}
+
+ctx.beginPath();
+points.forEach((point,i)=>{
+const x=xForFreq(point.freq);
+const y=yForLevel(point.level);
+if(i===0)ctx.moveTo(x,y);
+else ctx.lineTo(x,y);
+});
+ctx.lineTo(xForFreq(points[points.length-1].freq),bottom);
+ctx.lineTo(xForFreq(points[0].freq),bottom);
+ctx.closePath();
+ctx.fillStyle=fillGradient;
+ctx.fill();
+drawLine(points,strokeGradient,2);
+
+if(curFreq>=spectrum.start&&curFreq<=spectrum.end){
+const x=xForFreq(curFreq);
+ctx.fillStyle='rgba(140,190,255,.16)';
+ctx.fillRect(x-4,top,8,bottom-top);
+ctx.strokeStyle='rgba(196,228,255,.9)';
+ctx.lineWidth=1.2;
+ctx.beginPath();
+ctx.moveTo(x,top);
+ctx.lineTo(x,bottom);
+ctx.stroke();
+}
+
+const peak=points.reduce((best,point)=>point.level>best.level?point:best,points[0]);
+ctx.fillStyle='#ff6250';
+ctx.beginPath();
+ctx.arc(xForFreq(peak.freq),yForLevel(peak.level),3.2,0,Math.PI*2);
+ctx.fill();
+
+if(spectrum.hoverIndex>=0){
+const hover=spectrumPoint(spectrum.hoverIndex);
+if(hover){
+const x=xForFreq(hover.freq);
+const y=yForLevel(hover.level);
+ctx.setLineDash([4,4]);
+ctx.strokeStyle='rgba(255,255,255,.45)';
+ctx.lineWidth=1;
+ctx.beginPath();
+ctx.moveTo(x,top);
+ctx.lineTo(x,bottom);
+ctx.stroke();
+ctx.beginPath();
+ctx.moveTo(left,y);
+ctx.lineTo(right,y);
+ctx.stroke();
+ctx.setLineDash([]);
+ctx.fillStyle='#e8fff6';
+ctx.beginPath();
+ctx.arc(x,y,3.8,0,Math.PI*2);
+ctx.fill();
+const boxW=118,boxH=36;
+let boxX=x+10;
+if(boxX+boxW>right)boxX=x-boxW-10;
+let boxY=Math.max(top+8,y-44);
+if(boxY+boxH>bottom-4)boxY=bottom-boxH-4;
+ctx.fillStyle='rgba(8,12,16,.88)';
+ctx.strokeStyle='rgba(136,216,79,.55)';
+ctx.lineWidth=1;
+ctx.beginPath();
+ctx.moveTo(boxX+8,boxY);
+ctx.lineTo(boxX+boxW-8,boxY);
+ctx.quadraticCurveTo(boxX+boxW,boxY,boxX+boxW,boxY+8);
+ctx.lineTo(boxX+boxW,boxY+boxH-8);
+ctx.quadraticCurveTo(boxX+boxW,boxY+boxH,boxX+boxW-8,boxY+boxH);
+ctx.lineTo(boxX+8,boxY+boxH);
+ctx.quadraticCurveTo(boxX,boxY+boxH,boxX,boxY+boxH-8);
+ctx.lineTo(boxX,boxY+8);
+ctx.quadraticCurveTo(boxX,boxY,boxX+8,boxY);
+ctx.closePath();
+ctx.fill();
+ctx.stroke();
+ctx.fillStyle='#d4f48c';
+ctx.font='12px Courier New';
+ctx.textAlign='left';
+ctx.fillText(fmtFreq(hover.freq,'FM')+' MHz',boxX+8,boxY+14);
+ctx.fillStyle='#e2edf7';
+ctx.fillText(hover.level.toFixed(1)+' dBf',boxX+8,boxY+29);
+}
+}
+}
+
+function handleSpectrumPointer(e){
+if(spectrum.active||curBand!=='FM'||!spectrum.points.some(Boolean))return;
+const idx=spectrumIndexFromClientX(e.clientX);
+if(idx===spectrum.hoverIndex)return;
+spectrum.hoverIndex=idx;
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function handleSpectrumLeave(){
+if(spectrum.hoverIndex<0)return;
+spectrum.hoverIndex=-1;
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function handleSpectrumWheel(e){
+if(spectrum.active||curBand!=='FM')return;
+e.preventDefault();
+const dir=e.deltaY>0?1:-1;
+tune(curFreq+dir*stepSize(curBand),'FM');
+}
+
+function handleSpectrumClick(e){
+if(spectrum.active||curBand!=='FM')return;
+const idx=spectrum.hoverIndex>=0?spectrum.hoverIndex:spectrumIndexFromClientX(e.clientX);
+const point=spectrumResolveTunePoint(idx);
+if(point)tune(point.freq,'FM');
+}
+
+async function scanSpectrum(){
+if(spectrum.active||curBand!=='FM')return;
+setSpectrumStatus('running');
+try{
+const r=await fetch('/api/spectrum/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+if(!r.ok){
+setSpectrumStatus(r.status===409?'busy':'error');
+return;
+}
+const d=await r.json();
+updateSpectrumStatusEvent({state:'running',scan_id:d.scan_id,start:d.start,end:d.end,step:d.step,total:d.total});
+}catch(err){
+setSpectrumStatus('error');
+}
+}
+
+function updateSpectrumStatusEvent(d){
+if(d.state==='running'){
+spectrum.active=true;
+spectrum.status='running';
+spectrum.hoverIndex=-1;
+spectrum.scanId=d.scan_id||0;
+spectrum.start=d.start||0;
+spectrum.end=d.end||0;
+spectrum.step=d.step||100;
+spectrum.total=d.total||0;
+spectrum.points=[];
+}else{
+if(d.scan_id&&spectrum.scanId&&d.scan_id!==spectrum.scanId)return;
+spectrum.active=false;
+spectrum.hoverIndex=-1;
+if(d.state==='complete'){
+mergeHoldSpectrum();
+spectrum.status=spectrum.points.some(Boolean)?'ready':'idle';
+storeSpectrum();
+fetch('/api/status').then(r=>r.json()).then(v=>updateStatus(v)).catch(()=>{});
+fetch('/api/quality').then(r=>r.json()).then(v=>updateQuality(v)).catch(()=>{});
+}else if(d.state==='error'){
+spectrum.status='error';
+storeSpectrum();
+fetch('/api/status').then(r=>r.json()).then(v=>updateStatus(v)).catch(()=>{});
+fetch('/api/quality').then(r=>r.json()).then(v=>updateQuality(v)).catch(()=>{});
+}
+}
+updateSpectrumUi();
+requestSpectrumRender();
+}
+
+function updateSpectrumPoint(d){
+if(!d||!d.scan_id||d.scan_id!==spectrum.scanId)return;
+spectrum.points[d.index]={freq:d.freq,level:d.level};
+if((d.index%8)===0)updateSpectrumUi();
+requestSpectrumRender();
+}
 
 function updateMuteBtn(){
 const btn=document.getElementById('mutebtn');
@@ -297,6 +801,7 @@ let f=parseInt(document.getElementById('freqin').value);
 if(f)tune(f,document.getElementById('bandsel').value);
 }
 function doSeek(dir){
+if(spectrum.active){setSpectrumStatus('busy');return;}
 if(seeking)return;
 api('/api/seek',{direction:dir,band:document.getElementById('bandsel').value});
 }
@@ -320,14 +825,22 @@ document.getElementById('bwlabel').textContent=curBw>0?fmtBw(curBw):'';
 }
 
 function updateStatus(d){
+if(spectrum.active){
+updateSpectrumUi();
+requestSpectrumRender();
+return;
+}
 curFreq=d.freq;curBand=d.band;seeking=d.seeking;tuned=!!d.tuned;stereo=!!d.stereo;
 document.getElementById('band').textContent=d.band;
 document.getElementById('bandsel').value=d.band;
 document.getElementById('seekup').disabled=seeking;
 document.getElementById('seekdn').disabled=seeking;
 updateFreqDisplay();
+updateSpectrumUi();
+requestSpectrumRender();
 }
 function updateQuality(d){
+if(spectrum.active)return;
 curBw=d.bw||0;
 let lp=Math.min(100,Math.max(0,d.level));
 document.getElementById('lbar').style.width=lp+'%';
@@ -339,6 +852,7 @@ document.getElementById('sv').textContent=d.snr+' dB';
 document.getElementById('bwlabel').textContent=curBw>0?fmtBw(curBw):'';
 }
 function updateRDS(d){
+if(spectrum.active)return;
 const ps=document.getElementById('rdsps');
 ps.textContent=d.ps||'--------';
 ps.className='rds-ps'+(d.ps&&d.ps!=='--------'?'':' empty');
@@ -423,6 +937,8 @@ sse=new EventSource('/api/events');
 sse.addEventListener('status',e=>{updateStatus(JSON.parse(e.data))});
 sse.addEventListener('rds',e=>{updateRDS(JSON.parse(e.data))});
 sse.addEventListener('quality',e=>{updateQuality(JSON.parse(e.data))});
+sse.addEventListener('spectrum_status',e=>{updateSpectrumStatusEvent(JSON.parse(e.data))});
+sse.addEventListener('spectrum_point',e=>{updateSpectrumPoint(JSON.parse(e.data))});
 sse.onopen=()=>{document.getElementById('conn').className='status-dot on'};
 sse.onerror=()=>{
 document.getElementById('conn').className='status-dot off';
@@ -441,15 +957,24 @@ document.getElementById('conn').className='status-dot off';
 
 const saved=localStorage.getItem('lang');
 const auto=navigator.language.startsWith('zh')?'zh':'en';
+loadSpectrum();
 applyLang(saved||auto);
 fetch('/api/status').then(r=>r.json()).then(d=>updateStatus(d)).catch(()=>{});
 connectSSE();
 fetch('/api/version').then(r=>r.json()).then(d=>{
 document.getElementById('footer').textContent='v'+d.version+' ('+d.commit+'@'+d.branch+' '+d.date+')';
 }).catch(()=>{});
+document.getElementById('spectrumcanvas').addEventListener('pointermove',handleSpectrumPointer);
+document.getElementById('spectrumcanvas').addEventListener('pointerleave',handleSpectrumLeave);
+document.getElementById('spectrumcanvas').addEventListener('click',handleSpectrumClick);
+document.getElementById('spectrumcanvas').addEventListener('wheel',handleSpectrumWheel,{passive:false});
+window.addEventListener('resize',requestSpectrumRender);
 document.addEventListener('visibilitychange',()=>{
-if(document.hidden){disconnectSSE();stopAudio();}
-else connectSSE();
+if(document.hidden){
+if(!spectrum.active)disconnectSSE();
+stopAudio();
+}
+else{connectSSE();requestSpectrumRender();}
 });
 window.addEventListener('beforeunload',()=>{disconnectSSE();stopAudio();});
 </script>

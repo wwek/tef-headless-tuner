@@ -1,5 +1,6 @@
 #include "cmd_handler.h"
 
+#include "app_settings.h"
 #include "tuner_controller.h"
 #include "usb_cdc.h"
 #include "freertos/FreeRTOS.h"
@@ -87,7 +88,7 @@ static void cmd_tune(const char *arg)
         return;
     }
 
-    esp_err_t err = tuner_controller_tune_fm((uint32_t)freq);
+    esp_err_t err = app_settings_tune_fm((uint32_t)freq);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR tune: %s\r\n", esp_err_to_name(err));
         return;
@@ -109,7 +110,7 @@ static void cmd_tuneam(const char *arg)
         return;
     }
 
-    esp_err_t err = tuner_controller_tune_am((uint32_t)freq);
+    esp_err_t err = app_settings_tune_am((uint32_t)freq);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR tune AM: %s\r\n", esp_err_to_name(err));
         return;
@@ -143,7 +144,7 @@ static void cmd_seek(const char *arg)
         return;
     }
 
-    esp_err_t err = tuner_controller_start_seek(up, false);
+    esp_err_t err = app_settings_start_seek(up, false);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR seek: %s\r\n", esp_err_to_name(err));
         return;
@@ -161,7 +162,7 @@ static void cmd_seekam(const char *arg)
         return;
     }
 
-    esp_err_t err = tuner_controller_start_seek(up, true);
+    esp_err_t err = app_settings_start_seek(up, true);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR seek AM: %s\r\n", esp_err_to_name(err));
         return;
@@ -197,7 +198,7 @@ static void cmd_band(const char *arg)
     }
 
     uint32_t applied_freq_khz = 0;
-    esp_err_t err = tuner_controller_switch_band(band, &applied_freq_khz);
+    esp_err_t err = app_settings_switch_band(band, &applied_freq_khz);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR band: %s\r\n", esp_err_to_name(err));
         return;
@@ -305,7 +306,7 @@ static void cmd_volume(const char *arg)
         return;
     }
 
-    esp_err_t err = tuner_controller_set_volume((uint8_t)vol);
+    esp_err_t err = app_settings_set_volume((uint8_t)vol);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR volume: %s\r\n", esp_err_to_name(err));
         return;
@@ -321,7 +322,7 @@ static void cmd_mute(const char *arg)
         mute = false;
     }
 
-    esp_err_t err = tuner_controller_set_mute(mute);
+    esp_err_t err = app_settings_set_mute(mute);
     if (err != ESP_OK) {
         usb_cdc_write_fmt("ERROR mute: %s\r\n", esp_err_to_name(err));
         return;
